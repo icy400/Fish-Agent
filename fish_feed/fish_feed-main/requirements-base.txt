@@ -1,0 +1,7 @@
+# Core dependencies for basic functionality
+numpy>=1.21.0
+pandas>=1.4.0
+scikit-learn>=1.1.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+librosa>=0.9.0

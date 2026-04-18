@@ -1,0 +1,2 @@
+# TensorFlow Lite for inference only (lighter weight)
+tflite-runtime>=2.8.0

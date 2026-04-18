@@ -1,0 +1,2 @@
+# Audio recording dependencies
+pyaudio>=0.2.11

@@ -1,0 +1,13 @@
+{
+  "input_shape": [
+    1,
+    128,
+    13
+  ],
+  "output_shape": [
+    1,
+    2
+  ],
+  "input_dtype": "<class 'numpy.float32'>",
+  "output_dtype": "<class 'numpy.float32'>"
+}

@@ -1,0 +1,4 @@
+# TensorFlow for training (requires compatible platform)
+tensorflow>=2.8.0
+tensorflow-hub>=0.12.0
+tensorflow-io>=0.24.0

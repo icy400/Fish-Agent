@@ -1,0 +1,29 @@
+{
+  "audio_settings": {
+    "sample_rate": 22050,
+    "chunk_duration": 2.0,
+    "overlap": 0.5,
+    "n_mfcc": 13
+  },
+  "training_settings": {
+    "epochs": 50,
+    "batch_size": 32,
+    "validation_split": 0.2,
+    "early_stopping_patience": 10
+  },
+  "model_settings": {
+    "use_yamnet": true,
+    "quantize_model": true,
+    "target_accuracy": 0.85
+  },
+  "classes": [
+    "shrimp_chewing",
+    "aerator_noise",
+    "background"
+  ],
+  "feeding_logic": {
+    "shrimp_threshold": 0.7,
+    "aerator_threshold": 0.8,
+    "confidence_window": 5
+  }
+}

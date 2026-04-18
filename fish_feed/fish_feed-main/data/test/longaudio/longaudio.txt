@@ -1,0 +1,4 @@
+longaudio_001.wav: fish(0:00-1:27)、aerator(1:27-2:48)、fish(2:48-结尾)
+longaudio_002.wav: fish(0:00-1:27)、aerator(1:27-2:48)、fish(2:48-结尾)
+longaudio_003.wav: fish(0:00-1:27)、aerator(1:27-2:48)、fish(2:48-结尾)
+longaudio_004.wav: fish(0:00-1:27)、aerator(1:27-2:48)、fish(2:48-结尾)
