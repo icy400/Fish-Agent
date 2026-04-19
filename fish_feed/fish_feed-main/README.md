@@ -140,3 +140,43 @@ API endpoints:
 - `GET /api/v1/results?limit=50`
 - `POST /api/v1/analyze` (multipart form: `file`, `device_id`, `chunk_id`, `timestamp_utc`, `sample_rate`, `channel`)
 - `WS /ws/live` (real-time inference pushes)
+
+
+## Cross-Platform Startup Commands (Windows + Linux)
+
+### 1) Linux (inference service + web dashboard)
+
+```bash
+cd fish_feed/fish_feed-main
+python -m pip install -r requirements-base.txt
+uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+After startup:
+
+- Health: `http://<linux-host>:8000/api/v1/health`
+- Dashboard: `http://<linux-host>:8000/`
+
+### 2) Windows (hydrophone collector)
+
+Open PowerShell/CMD and run:
+
+```powershell
+cd "Continuous Sampling"
+py -m pip install requests
+py main.py
+```
+
+If `py` is not available, replace with `python`.
+
+Before starting collection, set the Linux endpoint in `Continuous Sampling/main.py`:
+
+```python
+UPLOAD_URL = "http://<linux-host>:8000/api/v1/analyze"
+```
+
+Then input the capture duration when prompted. The script will:
+
+1. collect hydrophone data through `BRC2.dll`,
+2. upload chunks to Linux in real time,
+3. still save a full local WAV file (default: `D:\ceshi.wav`).
