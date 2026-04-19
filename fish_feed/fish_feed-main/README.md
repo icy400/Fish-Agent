@@ -180,3 +180,32 @@ Then input the capture duration when prompted. The script will:
 1. collect hydrophone data through `BRC2.dll`,
 2. upload chunks to Linux in real time,
 3. still save a full local WAV file (default: `D:\ceshi.wav`).
+
+
+## Disk-Guard (Plan C) + Runtime Logs
+
+### Windows collector disk policy (Plan C)
+
+In `Continuous Sampling/main.py`:
+
+- `DISK_WARN_GB`: below this, local WAV save is disabled automatically.
+- `DISK_CRITICAL_GB`: critical low-space warning, upload-only mode is enforced.
+- `DISK_STOP_GB`: below this, collection stops to protect the system.
+- `DISK_CHECK_INTERVAL_SECONDS`: check interval.
+
+Runtime log file (Windows collector):
+
+- `collector_runtime.log` (rotating log, max 5MB, keep 3 backups)
+
+### Linux inference service runtime logs
+
+`server/app.py` writes rotating logs to:
+
+- default: `fish_feed/fish_feed-main/server_runtime.log`
+- override via environment variable: `FISH_SERVER_LOG`
+
+Example:
+
+```bash
+FISH_SERVER_LOG=/var/log/fish_feed_server.log uvicorn server.app:app --host 0.0.0.0 --port 8000
+```

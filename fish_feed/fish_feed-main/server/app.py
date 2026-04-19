@@ -1,5 +1,7 @@
 import os
 import tempfile
+import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,23 @@ LABELS_PATH = os.getenv(
     "FISH_LABELS_PATH", str(BASE_DIR / "models" / "yamnet_finetuned" / "label_encoder.json")
 )
 WEB_DIR = BASE_DIR / "web"
+LOG_FILE_PATH = Path(os.getenv("FISH_SERVER_LOG", str(BASE_DIR / "server_runtime.log")))
+
+logger = logging.getLogger("fish_feed_server")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler = RotatingFileHandler(
+        LOG_FILE_PATH,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
 
 class ConnectionManager:
@@ -26,10 +45,12 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.append(websocket)
+        logger.info("WebSocket connected. active=%s", len(self.active_connections))
 
     def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            logger.info("WebSocket disconnected. active=%s", len(self.active_connections))
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         for connection in list(self.active_connections):
@@ -64,6 +85,7 @@ def load_model() -> None:
         chunk_duration=2.0,
         overlap=0.5,
     )
+    logger.info("Server started. model=%s labels=%s log=%s", MODEL_PATH, label_path, LOG_FILE_PATH)
 
 
 @app.get("/api/v1/health")
@@ -98,6 +120,7 @@ async def analyze_chunk(
         os.unlink(tmp_path)
 
     if result is None:
+        logger.error("inference failed device=%s chunk=%s", device_id, chunk_id)
         response = {
             "ok": False,
             "error": "inference failed",
@@ -119,6 +142,14 @@ async def analyze_chunk(
     recent_results.append(event)
     if len(recent_results) > 2000:
         del recent_results[: len(recent_results) - 2000]
+
+    logger.info(
+        "inference ok device=%s chunk=%s class=%s conf=%.4f",
+        event["device_id"],
+        event["chunk_id"],
+        result.get("predicted_class"),
+        float(result.get("confidence", 0.0)),
+    )
 
     await manager.broadcast(event)
     return event
