@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fish Feed Live Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0b1020; color: #f1f5f9; margin: 0; }
+    .container { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+    .card { background: #121a2d; border: 1px solid #26324d; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .pill { border-radius: 999px; padding: 6px 12px; display: inline-block; background: #1d4ed8; }
+    .ok { background: #166534; }
+    .bad { background: #991b1b; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid #334155; padding: 8px; text-align: left; }
+    .mono { font-family: Consolas, Menlo, monospace; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Fish Feed 实时分析看板</h1>
+
+    <div class="card row">
+      <div>
+        <div>Backend 状态</div>
+        <div id="health" class="pill">检测中...</div>
+      </div>
+      <div>
+        <div>WebSocket 状态</div>
+        <div id="ws" class="pill">连接中...</div>
+      </div>
+      <div>
+        <div>最近设备</div>
+        <div id="device" class="mono">-</div>
+      </div>
+      <div>
+        <div>最新类别</div>
+        <div id="klass" class="mono">-</div>
+      </div>
+      <div>
+        <div>置信度</div>
+        <div id="conf" class="mono">-</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>最近结果</h3>
+      <table>
+        <thead>
+        <tr>
+          <th>时间</th>
+          <th>设备</th>
+          <th>chunk_id</th>
+          <th>类别</th>
+          <th>置信度</th>
+        </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+const healthEl = document.getElementById('health');
+const wsEl = document.getElementById('ws');
+const deviceEl = document.getElementById('device');
+const klassEl = document.getElementById('klass');
+const confEl = document.getElementById('conf');
+const tbody = document.getElementById('tbody');
+
+const rows = [];
+
+function addRow(item) {
+  rows.unshift(item);
+  while (rows.length > 30) rows.pop();
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.timestamp_utc || '-'}</td>
+      <td>${r.device_id || '-'}</td>
+      <td class="mono">${r.chunk_id || '-'}</td>
+      <td>${r.result?.predicted_class || '-'}</td>
+      <td>${(r.result?.confidence ?? 0).toFixed(4)}</td>
+    </tr>
+  `).join('');
+}
+
+async function checkHealth() {
+  try {
+    const res = await fetch('/api/v1/health');
+    if (!res.ok) throw new Error('bad health');
+    healthEl.textContent = '在线';
+    healthEl.className = 'pill ok';
+  } catch (e) {
+    healthEl.textContent = '离线';
+    healthEl.className = 'pill bad';
+  }
+}
+
+async function loadHistory() {
+  const res = await fetch('/api/v1/results?limit=20');
+  if (!res.ok) return;
+  const data = await res.json();
+  (data.items || []).slice().reverse().forEach(addRow);
+}
+
+function connectWs() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
+
+  ws.onopen = () => {
+    wsEl.textContent = '已连接';
+    wsEl.className = 'pill ok';
+    ws.send('ping');
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    deviceEl.textContent = msg.device_id || '-';
+    klassEl.textContent = msg.result?.predicted_class || '-';
+    confEl.textContent = (msg.result?.confidence ?? 0).toFixed(4);
+    addRow(msg);
+    ws.send('ping');
+  };
+
+  ws.onclose = () => {
+    wsEl.textContent = '断开';
+    wsEl.className = 'pill bad';
+    setTimeout(connectWs, 1200);
+  };
+}
+
+checkHealth();
+loadHistory();
+connectWs();
+setInterval(checkHealth, 10000);
+</script>
+</body>
+</html>

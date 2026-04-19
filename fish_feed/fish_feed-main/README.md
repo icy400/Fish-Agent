@@ -112,3 +112,31 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 - Built with TensorFlow and TensorFlow Lite for efficient audio classification.
 - Uses YamNet for transfer learning.
 - Developed to support sustainable shrimp farming in Ecuador.
+
+
+## Live Linux Service + Web Dashboard
+
+This repository now includes a lightweight API service and dashboard for cross-platform deployment:
+
+- **Linux backend API**: `server/app.py`
+- **Web dashboard**: `web/index.html`
+- **Windows collector integration target endpoint**: `POST /api/v1/analyze`
+
+Start on Linux:
+
+```bash
+uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+Open dashboard:
+
+```text
+http://<linux-host>:8000/
+```
+
+API endpoints:
+
+- `GET /api/v1/health`
+- `GET /api/v1/results?limit=50`
+- `POST /api/v1/analyze` (multipart form: `file`, `device_id`, `chunk_id`, `timestamp_utc`, `sample_rate`, `channel`)
+- `WS /ws/live` (real-time inference pushes)
