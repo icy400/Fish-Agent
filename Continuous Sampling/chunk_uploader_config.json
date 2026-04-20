@@ -1,0 +1,21 @@
+{
+  "server_base_url": "http://127.0.0.1:8081",
+  "upload_path": "/realtime/chunk/upload",
+  "device_id": "windows-hydrophone-01",
+  "watch_dir": "D:/hydrophone/chunks",
+  "audio_extensions": [
+    ".wav",
+    ".mp3"
+  ],
+  "scan_interval_seconds": 2,
+  "request_timeout_seconds": 20,
+  "max_retries": 3,
+  "retry_backoff_seconds": 2,
+  "delete_after_upload": true,
+  "uploaded_record_file": "uploaded_chunks.log",
+  "log_level": "INFO",
+  "log_file": "logs/chunk_uploader.log",
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5,
+  "log_to_console": true
+}

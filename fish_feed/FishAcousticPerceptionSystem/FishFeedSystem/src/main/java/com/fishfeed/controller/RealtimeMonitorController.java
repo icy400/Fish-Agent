@@ -4,11 +4,15 @@ import com.fishfeed.entity.MonitorResult;
 import com.fishfeed.service.RealtimeMonitorService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/realtime")
@@ -18,27 +22,41 @@ public class RealtimeMonitorController {
     private RealtimeMonitorService service;
     
     @GetMapping("/start")
-    public void start() {
+    public Map<String, Object> start() {
         service.start();
+        return ok("监测已启动");
     }
     
     @GetMapping("/stop")
-    public void stop() {
+    public Map<String, Object> stop() {
         service.stop();
+        return ok("监测已停止");
     }
     
     @GetMapping("/reset")
-    public void reset() {
+    public Map<String, Object> reset() {
         service.reset();
+        return ok("统计已重置");
     }
     
     @GetMapping("/data")
     public MonitorResult data() {
-        return service.getResult();  // 必须返回实时更新的对象
+        return service.getResult();
     }
     
-    // 保存当前的 emitter，以便随时推送
-    private SseEmitter currentEmitter;
+    @GetMapping("/config")
+    public Map<String, Object> config() {
+        return service.getConfigSnapshot();
+    }
+    
+    @PostMapping("/chunk/upload")
+    public Map<String, Object> uploadChunk(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "deviceId", required = false) String deviceId,
+            @RequestParam(value = "collectedAt", required = false) String collectedAt
+    ) {
+        return service.ingestChunk(file, deviceId, collectedAt);
+    }
     
     /**
      * 前端连接这个接口来接收推送
@@ -46,30 +64,15 @@ public class RealtimeMonitorController {
      */
     @GetMapping("/stream")
     public SseEmitter stream() {
-        // 设置超时时间，0表示永不过期
-        SseEmitter emitter = new SseEmitter(0L);
-        this.currentEmitter = emitter;
-        
-        // 监听连接关闭事件
-        emitter.onCompletion(() -> System.out.println("SSE 连接关闭"));
-        emitter.onTimeout(() -> System.out.println("SSE 连接超时"));
-        emitter.onError(e -> System.out.println("SSE 连接错误"));
-        
-        return emitter;
+        return service.registerEmitter();
     }
     
-    /**
-     * 在你的业务逻辑中（比如 Python 识别完成后），调用这个方法推送数据
-     */
-    public void pushData(Object data) {
-        if (currentEmitter != null) {
-            try {
-                // 发送 JSON 数据
-                currentEmitter.send(data);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
+    private Map<String, Object> ok(String msg) {
+        Map<String, Object> res = new HashMap<>();
+        res.put("code", 200);
+        res.put("msg", msg);
+        res.put("data", service.getResult());
+        return res;
     }
     
 }

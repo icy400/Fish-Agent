@@ -23,3 +23,46 @@ inference:
   service:
     url: http://localhost:8001/predict
 
+# 运行日志配置（支持滚动归档）
+logging:
+  file:
+    name: ${LOG_FILE:${user.dir}/logs/fishfeed-app.log}
+  level:
+    root: INFO
+    com.fishfeed: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  logback:
+    rollingpolicy:
+      file-name-pattern: ${LOG_ROLLING_PATTERN:${user.dir}/logs/fishfeed-app.%d{yyyy-MM-dd}.%i.log}
+      max-file-size: ${LOG_MAX_FILE_SIZE:20MB}
+      max-history: ${LOG_MAX_HISTORY:30}
+      total-size-cap: ${LOG_TOTAL_SIZE_CAP:2GB}
+      clean-history-on-start: false
+
+# 方案B（Windows采集 + Linux识别）实时策略配置
+fishfeed:
+  logging:
+    request-trace-enabled: true
+    slow-request-ms: 800
+    trace-path-prefixes:
+      - /realtime
+      - /upload-audio
+      - /analyze-audio
+  realtime:
+    mode: remote-upload
+    upload-dir: ${user.dir}/realtime_chunk_upload
+    keep-uploaded-chunks: false
+    python-command: python
+    python-script-path: src/main/resources/python/audio_realtime_infer.py
+    chunk-seconds: 6
+    decision-window-size: 5
+    fish-segment-threshold: 0.50
+    fish-type-threshold: 0.34
+    start-threshold: 0.45
+    reduce-threshold: 0.25
+    stop-threshold: 0.15
+    start-consecutive-windows: 2
+    stop-consecutive-windows: 3
+    default-confidence: 0.50
