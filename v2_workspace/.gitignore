@@ -1,0 +1,8 @@
+logs/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+backend/target/
+frontend/node_modules/
+frontend/dist/
+windows-agent/uploader/uploaded_chunks.log

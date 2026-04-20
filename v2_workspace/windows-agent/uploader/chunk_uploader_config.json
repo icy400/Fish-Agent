@@ -1,0 +1,39 @@
+{
+  "_comments": {
+    "server_base_url": "Linux 后端服务地址（协议+IP+端口）",
+    "upload_path": "上传分片接口路径，通常为 /realtime/chunk/upload",
+    "device_id": "当前 Windows 采集设备标识，会随请求上传用于区分设备",
+    "watch_dir": "Windows 本地待上传分片目录，采集程序将分片写入该目录",
+    "audio_extensions": "允许上传的音频后缀白名单",
+    "scan_interval_seconds": "扫描待上传目录的间隔秒数",
+    "request_timeout_seconds": "单次 HTTP 上传超时秒数",
+    "max_retries": "单个分片上传失败后的最大重试次数",
+    "retry_backoff_seconds": "每次重试前的等待秒数",
+    "delete_after_upload": "上传成功后是否删除本地分片文件",
+    "uploaded_record_file": "已上传记录文件路径（用于断点续传防重复）",
+    "log_level": "上传代理日志级别（DEBUG/INFO/WARN/ERROR）",
+    "log_file": "上传代理日志文件路径",
+    "log_max_bytes": "单个日志文件最大字节数，超过后滚动切分",
+    "log_backup_count": "保留的历史滚动日志文件数量",
+    "log_to_console": "是否同时输出日志到控制台"
+  },
+  "server_base_url": "http://127.0.0.1:8081",
+  "upload_path": "/realtime/chunk/upload",
+  "device_id": "windows-hydrophone-01",
+  "watch_dir": "D:/hydrophone/chunks",
+  "audio_extensions": [
+    ".wav",
+    ".mp3"
+  ],
+  "scan_interval_seconds": 2,
+  "request_timeout_seconds": 20,
+  "max_retries": 3,
+  "retry_backoff_seconds": 2,
+  "delete_after_upload": true,
+  "uploaded_record_file": "uploaded_chunks.log",
+  "log_level": "INFO",
+  "log_file": "logs/chunk_uploader.log",
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5,
+  "log_to_console": true
+}
