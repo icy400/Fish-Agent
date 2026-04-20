@@ -1,68 +1,124 @@
+# =========================
+# 基础服务配置
+# =========================
 server:
+  # Spring Boot 服务监听端口
   port: 8081
   tomcat:
-    max-swallow-size: -1     # 不限制Tomcat缓存大小
-    connection-timeout: 3600000  # 超时时间1小时，防止大文件断连
+    # 单次请求可吞入的最大体积，-1 表示不限制（用于大音频上传）
+    max-swallow-size: -1
+    # 连接超时时间（毫秒）
+    connection-timeout: 3600000
 
+# =========================
+# Spring 组件配置
+# =========================
 spring:
   datasource:
+    # MySQL 连接地址
     url: jdbc:mysql://localhost:3306/fish_feed?useSSL=false&serverTimezone=Asia/Shanghai
+    # MySQL 用户名
     username: root
+    # MySQL 密码
     password: 123456
   jpa:
     hibernate:
+      # 启动时的表结构策略：update 表示自动按实体更新表结构
       ddl-auto: update
+    # 是否在控制台输出 SQL
     show-sql: true
   servlet:
     multipart:
+      # 单个上传文件最大体积，-1 表示不限制
       max-file-size: -1
+      # 单次请求总上传体积，-1 表示不限制
       max-request-size: -1
+      # 是否开启 multipart 上传支持
       enabled: true
 
+# =========================
+# 推理服务占位配置（当前方案B未直接使用）
+# =========================
 inference:
   service:
+    # 预留的外部推理服务地址
     url: http://localhost:8001/predict
 
-# 运行日志配置（支持滚动归档）
+# =========================
+# 后端运行日志配置（滚动归档）
+# =========================
 logging:
   file:
+    # 主日志文件路径，可通过环境变量 LOG_FILE 覆盖
     name: ${LOG_FILE:${user.dir}/logs/fishfeed-app.log}
   level:
+    # 全局日志级别
     root: INFO
+    # fishfeed 项目包日志级别
     com.fishfeed: INFO
   pattern:
+    # 控制台日志格式
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    # 文件日志格式
     file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
   logback:
     rollingpolicy:
+      # 滚动日志命名规则，可通过 LOG_ROLLING_PATTERN 覆盖
       file-name-pattern: ${LOG_ROLLING_PATTERN:${user.dir}/logs/fishfeed-app.%d{yyyy-MM-dd}.%i.log}
+      # 单个日志文件最大体积，可通过 LOG_MAX_FILE_SIZE 覆盖
       max-file-size: ${LOG_MAX_FILE_SIZE:20MB}
+      # 日志保留天数，可通过 LOG_MAX_HISTORY 覆盖
       max-history: ${LOG_MAX_HISTORY:30}
+      # 所有滚动日志总容量上限，可通过 LOG_TOTAL_SIZE_CAP 覆盖
       total-size-cap: ${LOG_TOTAL_SIZE_CAP:2GB}
+      # 启动时是否清理历史日志
       clean-history-on-start: false
 
-# 方案B（Windows采集 + Linux识别）实时策略配置
+# =========================
+# 项目自定义配置（方案B：Windows采集 + Linux识别）
+# =========================
 fishfeed:
   logging:
+    # 是否开启请求轨迹日志
     request-trace-enabled: true
+    # 慢请求阈值（毫秒），超过会以 slow 警告记录
     slow-request-ms: 800
+    # 仅对以下路径前缀输出请求轨迹日志
     trace-path-prefixes:
+      # 实时监测相关接口
       - /realtime
+      # 音频上传接口
       - /upload-audio
+      # 离线分析接口
       - /analyze-audio
   realtime:
+    # 实时模式：remote-upload 表示由 Windows 上传分片驱动
     mode: remote-upload
+    # Linux 端暂存上传分片目录
     upload-dir: ${user.dir}/realtime_chunk_upload
+    # 是否保留上传分片文件（调试可设 true，生产建议 false）
     keep-uploaded-chunks: false
+    # 调用推理脚本使用的 Python 命令
     python-command: python
+    # 推理脚本路径（建议 Linux 部署时改成绝对路径）
     python-script-path: src/main/resources/python/audio_realtime_infer.py
+    # 单个音频分片时长（秒）
     chunk-seconds: 6
+    # 决策滑动窗口长度（窗口内按分片统计）
     decision-window-size: 5
+    # 单段被视为鱼声的概率阈值（用于统计 fish segment）
     fish-segment-threshold: 0.50
+    # 当前分片被判定为“鱼类摄食声”的鱼声占比阈值
     fish-type-threshold: 0.34
+    # 触发“开始投喂”动作的窗口鱼声占比阈值
     start-threshold: 0.45
+    # 触发“减量投喂”动作的窗口鱼声占比阈值
     reduce-threshold: 0.25
+    # 触发“停止投喂”动作的窗口鱼声占比阈值
     stop-threshold: 0.15
+    # 触发开始投喂所需的连续命中窗口数
     start-consecutive-windows: 2
+    # 触发停止投喂所需的连续命中窗口数
     stop-consecutive-windows: 3
+    # 无有效识别结果时使用的默认置信度
     default-confidence: 0.50
