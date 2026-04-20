@@ -9,6 +9,24 @@ Windows 侧仅承担两件事：
 
 - `uploader/chunk_uploader.py`
 - `uploader/chunk_uploader_config.json`
+- `capture/main.py` 及相关 DLL/INI 依赖文件
+
+## 快速运行
+
+```powershell
+# 1) 上传代理
+cd v2_workspace\windows-agent\uploader
+conda create -n fish-win python=3.10 -y
+conda activate fish-win
+pip install requests
+python .\chunk_uploader.py
+```
+
+```powershell
+# 2) 采集程序（仅 Windows）
+cd v2_workspace\windows-agent\capture
+python .\main.py
+```
 
 ## 建议
 

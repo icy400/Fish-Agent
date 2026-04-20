@@ -1,6 +1,6 @@
 # Simple Backend (FastAPI)
 
-这是最简可运行后端骨架，目标是先跑通：
+这是 Linux 侧最简可运行后端，目标是先跑通：
 
 1. 实时状态接口
 2. 分片上传接口
@@ -20,9 +20,13 @@ backend/
 
 ```bash
 cd v2_workspace/backend
-conda create -n fish-simple python=3.10 -y
-conda activate fish-simple
+conda create -n fish-linux python=3.10 -y
+conda activate fish-linux
 pip install -r requirements.txt
+
+# 如需真实模型推理，再安装：
+pip install -r ../ml-core/requirements-infer.txt
+
 uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
 ```
 
@@ -42,3 +46,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
 
 - `inference.mode = "mock"`：无需模型依赖，最快跑通
 - `inference.mode = "python_script"`：调用真实推理脚本
+- `inference.script_path`：默认指向 `../ml-core/inference/audio_realtime_infer.py`
+
+## 日志文件
+
+- 默认日志：`runtime/logs/backend.log`
+- 支持滚动切分（`max_bytes` + `backup_count`）
