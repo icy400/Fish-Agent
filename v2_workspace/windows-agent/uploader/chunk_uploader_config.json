@@ -17,9 +17,9 @@
     "log_backup_count": "保留的历史滚动日志文件数量",
     "log_to_console": "是否同时输出日志到控制台"
   },
-  "server_base_url": "http://127.0.0.1:8081",
+  "server_base_url": "http://192.168.0.101:8081",
   "upload_path": "/realtime/chunk/upload",
-  "device_id": "windows-hydrophone-01",
+  "device_id": "windows-hydrophone-192.168.0.123",
   "watch_dir": "D:/hydrophone/chunks",
   "audio_extensions": [
     ".wav",
