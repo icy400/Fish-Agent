@@ -2,6 +2,7 @@ import json
 import logging
 import random
 import subprocess
+import time
 from collections import deque
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -11,6 +12,7 @@ from typing import Any, Dict, List
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 
 def load_config() -> Dict[str, Any]:
@@ -54,6 +56,86 @@ def setup_logger() -> logging.Logger:
 log = setup_logger()
 
 
+class AgentHeartbeat(BaseModel):
+    deviceId: str = "windows-hydrophone-01"
+    running: bool = True
+    collecting: bool = False
+    uploaderRunning: bool = True
+    capturedChunks: int = 0
+    message: str = ""
+    lastError: str = ""
+
+
+class AgentControlState:
+    def __init__(self):
+        agent_cfg = CONFIG["agent_control"]
+        self.lock = Lock()
+        self.collect_enabled = False
+        self.last_command = "STOP"
+        self.last_command_at = "-"
+        self.last_command_epoch = 0.0
+        self.last_heartbeat_at = "-"
+        self.last_heartbeat_epoch = 0.0
+        self.device_id = "-"
+        self.running = False
+        self.collecting = False
+        self.uploader_running = False
+        self.captured_chunks = 0
+        self.message = ""
+        self.last_error = ""
+        self.heartbeat_timeout_seconds = int(agent_cfg["heartbeat_timeout_seconds"])
+
+    def _is_online(self) -> bool:
+        if self.last_heartbeat_epoch <= 0:
+            return False
+        return (time.time() - self.last_heartbeat_epoch) <= self.heartbeat_timeout_seconds
+
+    def control_snapshot(self) -> Dict[str, Any]:
+        return {
+            "collectEnabled": self.collect_enabled,
+            "lastCommand": self.last_command,
+            "lastCommandAt": self.last_command_at,
+            "serverTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "pollHintSeconds": int(CONFIG["agent_control"]["control_poll_hint_seconds"]),
+        }
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        online = self._is_online()
+        return {
+            "collectEnabled": self.collect_enabled,
+            "lastCommand": self.last_command,
+            "lastCommandAt": self.last_command_at,
+            "online": online,
+            "agentStatus": "在线" if online else "离线",
+            "deviceId": self.device_id,
+            "running": self.running,
+            "collecting": self.collecting,
+            "uploaderRunning": self.uploader_running,
+            "capturedChunks": self.captured_chunks,
+            "message": self.message,
+            "lastError": self.last_error,
+            "lastHeartbeatAt": self.last_heartbeat_at,
+            "heartbeatTimeoutSeconds": self.heartbeat_timeout_seconds,
+        }
+
+    def set_collect_enabled(self, enabled: bool):
+        self.collect_enabled = enabled
+        self.last_command = "START" if enabled else "STOP"
+        self.last_command_epoch = time.time()
+        self.last_command_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def update_heartbeat(self, hb: AgentHeartbeat):
+        self.last_heartbeat_epoch = time.time()
+        self.last_heartbeat_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.device_id = hb.deviceId or "-"
+        self.running = bool(hb.running)
+        self.collecting = bool(hb.collecting)
+        self.uploader_running = bool(hb.uploaderRunning)
+        self.captured_chunks = int(max(0, hb.capturedChunks))
+        self.message = hb.message or ""
+        self.last_error = hb.lastError or ""
+
+
 class RealtimeState:
     def __init__(self):
         rt_cfg = CONFIG["realtime"]
@@ -94,6 +176,7 @@ class RealtimeState:
 
 
 STATE = RealtimeState()
+AGENT_STATE = AgentControlState()
 app = FastAPI(title="Fish Feed Simple Backend", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -290,6 +373,57 @@ def realtime_config() -> Dict[str, Any]:
         "pythonCommand": infer_cfg["python_command"],
         "pythonScriptPath": infer_cfg["script_path"],
     }
+
+
+@app.get("/agent/control")
+def agent_control() -> Dict[str, Any]:
+    with AGENT_STATE.lock:
+        return AGENT_STATE.control_snapshot()
+
+
+@app.get("/agent/state")
+def agent_state() -> Dict[str, Any]:
+    with AGENT_STATE.lock:
+        return AGENT_STATE.status_snapshot()
+
+
+@app.post("/agent/heartbeat")
+def agent_heartbeat(payload: AgentHeartbeat) -> Dict[str, Any]:
+    with AGENT_STATE.lock:
+        AGENT_STATE.update_heartbeat(payload)
+        snapshot = AGENT_STATE.status_snapshot()
+    log.debug(
+        "agent_heartbeat: device=%s running=%s collecting=%s uploader=%s chunks=%s",
+        payload.deviceId,
+        payload.running,
+        payload.collecting,
+        payload.uploaderRunning,
+        payload.capturedChunks,
+    )
+    return {
+        "code": 200,
+        "msg": "heartbeat received",
+        "collectEnabled": snapshot["collectEnabled"],
+        "serverTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+@app.get("/agent/collect/start")
+def agent_collect_start() -> Dict[str, Any]:
+    with AGENT_STATE.lock:
+        AGENT_STATE.set_collect_enabled(True)
+        snapshot = AGENT_STATE.status_snapshot()
+    log.info("agent_collect command set to START")
+    return {"code": 200, "msg": "已下发开始采集指令", "data": snapshot}
+
+
+@app.get("/agent/collect/stop")
+def agent_collect_stop() -> Dict[str, Any]:
+    with AGENT_STATE.lock:
+        AGENT_STATE.set_collect_enabled(False)
+        snapshot = AGENT_STATE.status_snapshot()
+    log.info("agent_collect command set to STOP")
+    return {"code": 200, "msg": "已下发停止采集指令", "data": snapshot}
 
 
 @app.get("/realtime/start")

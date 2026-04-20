@@ -1,3 +1,5 @@
+import argparse
+import os
 import time
 import ctypes
 import wave
@@ -63,7 +65,7 @@ REFER_VOLT = 4096            # 参考电压
 IEPE_MODE = 0                # 普通ADC采样模式，固定0
 
 # WAV文件配置
-WAVE_FILE_PATH = r"D:\ceshi.wav"  #固定保存到盘根目录
+WAVE_FILE_PATH = os.environ.get("HYDROPHONE_WAVE_FILE_PATH", r"D:\ceshi.wav")
 WAVE_BIT_DEPTH = 16               
 
 # 初始化变量
@@ -107,7 +109,12 @@ def save_to_wav(data_list, sample_rate, file_path, bit_depth=16):
 
 # ----------------------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("===== 单通道采集程序【100000Hz采样率 → 保存D盘ceshi.wav】 =====")
+    parser = argparse.ArgumentParser(description="Hydrophone single-channel capture")
+    parser.add_argument("--duration-seconds", type=float, default=None, help="采集时长（秒）")
+    parser.add_argument("--auto-start", action="store_true", help="不等待回车，直接开始采集")
+    args = parser.parse_args()
+
+    print(f"===== 单通道采集程序【100000Hz采样率 → 保存到 {WAVE_FILE_PATH}】 =====")
     collect_data = []  # 存储所有采集的电压数据，全程不丢失
     flag_run = True
 
@@ -158,19 +165,31 @@ if __name__ == "__main__":
     # 7. 手动输入采集时长 + 开始采集核心逻辑
     if flag_run:
         print("\n=====================================")
-        # 手动输入采集时长，单位：秒，支持小数（比如 2.5 = 2.5秒）
-        while True:
-            try:
-                collect_time = float(input(f"请输入需要采集的时长（单位：秒）："))
-                if collect_time > 0: break
-                else: print("❌ 时长必须大于0，请重新输入！")
-            except:
-                print("❌ 输入格式错误，请输入数字（如：1、2.5、5）！")
+        # 支持命令行传入采集时长，未传入时走交互输入
+        if args.duration_seconds is not None:
+            collect_time = float(args.duration_seconds)
+            if collect_time <= 0:
+                print("❌ --duration-seconds 必须大于 0")
+                flag_run = False
+        else:
+            while True:
+                try:
+                    collect_time = float(input("请输入需要采集的时长（单位：秒）："))
+                    if collect_time > 0:
+                        break
+                    print("❌ 时长必须大于0，请重新输入！")
+                except Exception:
+                    print("❌ 输入格式错误，请输入数字（如：1、2.5、5）！")
+
+    if flag_run:
         
         # 计算需要采集的总点数 = 采样率 × 采集时长
         total_need_points = int(SAMPLE_RATE * collect_time)
         print(f"\n 采集配置确认：单通道CH{COLLECT_CHANNEL+1} | 100000Hz | 时长{collect_time}s | 总点数{total_need_points}")
-        input("按下回车键，开始采集数据...")
+        if args.auto_start:
+            print("自动模式：直接开始采集")
+        else:
+            input("按下回车键，开始采集数据...")
 
         # 启动连续采样
         print("\n启动采样...")

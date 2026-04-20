@@ -22,7 +22,9 @@
     "logging.level": "日志级别：DEBUG/INFO/WARN/ERROR",
     "logging.max_bytes": "单个日志文件最大字节数",
     "logging.backup_count": "滚动日志保留份数",
-    "cors.allow_origins": "允许访问后端的前端来源列表"
+    "cors.allow_origins": "允许访问后端的前端来源列表",
+    "agent_control.heartbeat_timeout_seconds": "Windows 代理心跳超时阈值（秒），超过视为离线",
+    "agent_control.control_poll_hint_seconds": "建议 Windows 代理轮询控制接口的间隔秒数"
   },
   "app": {
     "host": "0.0.0.0",
@@ -61,5 +63,9 @@
       "http://127.0.0.1:5173",
       "http://localhost:5173"
     ]
+  },
+  "agent_control": {
+    "heartbeat_timeout_seconds": 15,
+    "control_poll_hint_seconds": 1
   }
 }

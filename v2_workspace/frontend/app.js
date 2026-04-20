@@ -15,6 +15,8 @@ const ids = [
   "lastChunkName",
   "lastChunkAt",
   "lastDeviceId",
+  "agentStatus",
+  "collectCommand",
 ];
 
 const el = {};
@@ -45,6 +47,11 @@ function applyData(data) {
   el.lastDeviceId.textContent = data.lastDeviceId ?? "-";
 }
 
+function applyAgent(agent) {
+  el.agentStatus.textContent = agent?.agentStatus ?? "-";
+  el.collectCommand.textContent = agent?.collectEnabled ? "START" : "STOP";
+}
+
 async function getJSON(path) {
   const res = await fetch(`${API_BASE}${path}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -53,8 +60,12 @@ async function getJSON(path) {
 
 async function loadData() {
   try {
-    const data = await getJSON("/realtime/data");
+    const [data, agent] = await Promise.all([
+      getJSON("/realtime/data"),
+      getJSON("/agent/state"),
+    ]);
     applyData(data);
+    applyAgent(agent);
   } catch (err) {
     console.error(err);
   }
@@ -69,8 +80,32 @@ async function callAction(path) {
   }
 }
 
-document.getElementById("btnStart").addEventListener("click", () => callAction("/realtime/start"));
-document.getElementById("btnStop").addEventListener("click", () => callAction("/realtime/stop"));
+async function startCollect() {
+  try {
+    const monitor = await getJSON("/realtime/start");
+    if (monitor.data) applyData(monitor.data);
+    const control = await getJSON("/agent/collect/start");
+    if (control.data) applyAgent(control.data);
+    await loadData();
+  } catch (err) {
+    alert(`开始采集失败: ${err.message}`);
+  }
+}
+
+async function stopCollect() {
+  try {
+    const control = await getJSON("/agent/collect/stop");
+    if (control.data) applyAgent(control.data);
+    const monitor = await getJSON("/realtime/stop");
+    if (monitor.data) applyData(monitor.data);
+    await loadData();
+  } catch (err) {
+    alert(`停止采集失败: ${err.message}`);
+  }
+}
+
+document.getElementById("btnStart").addEventListener("click", startCollect);
+document.getElementById("btnStop").addEventListener("click", stopCollect);
 document.getElementById("btnReset").addEventListener("click", () => callAction("/realtime/reset"));
 document.getElementById("btnRefresh").addEventListener("click", () => loadData());
 

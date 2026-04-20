@@ -1,34 +1,34 @@
 # Windows Agent
 
-Windows 侧仅承担两件事：
+Windows 侧现在只需启动一个入口文件：
 
-1. 本地水听器采集（采集程序在 Windows 环境运行）
-2. 将分片上传到 Linux 后端
+1. 本地水听器采集（调用 `capture/main.py`）
+2. 自动上传分片（拉起 `uploader/chunk_uploader.py`）
+3. 轮询 Linux 后端采集指令（开始/停止）
+4. 上报运行心跳到后端（前端可看到在线状态）
 
 ## 已保留
 
-- `uploader/chunk_uploader.py`
-- `uploader/chunk_uploader_config.json`
-- `capture/main.py` 及相关 DLL/INI 依赖文件
+- `run_agent.py`（统一入口）
+- `agent_config.json`（统一配置）
+- `uploader/chunk_uploader.py` + `uploader/chunk_uploader_config.json`
+- `capture/main.py` + DLL/INI 依赖文件
 
 ## 快速运行
 
 ```powershell
-# 1) 上传代理
-cd v2_workspace\windows-agent\uploader
+# 1) 环境安装
+cd v2_workspace\windows-agent
 conda create -n fish-win python=3.10 -y
 conda activate fish-win
 pip install requests
-python .\chunk_uploader.py
-```
 
-```powershell
-# 2) 采集程序（仅 Windows）
-cd v2_workspace\windows-agent\capture
-python .\main.py
+# 2) 一键启动（内部会自动拉起采集+上传）
+python .\run_agent.py
 ```
 
 ## 建议
 
-- 采集程序输出分片到固定目录（与 uploader 的 `watch_dir` 对齐）
-- 上传成功后删除分片，缓解 Windows 磁盘压力
+- `agent_config.json` 中的 `server_base_url` 改成 Linux 后端地址。
+- `uploader/chunk_uploader_config.json` 的 `watch_dir` 与采集输出目录保持一致。
+- 前端页面点击“开始采集/停止采集”即可远程控制采集状态。
