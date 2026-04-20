@@ -1,19 +1,28 @@
-# Frontend Rebuild Entry
+# Simple Frontend (Vanilla HTML/JS)
 
-这里作为前端重构入口，建议只保留业务可视化：
+这是最简前端骨架，不需要 npm 构建，直接静态文件运行。
 
-1. 实时监测状态卡片
-2. 分片识别趋势图
-3. 投喂策略动作与建议
-4. 设备状态与告警
-5. 运行日志检索入口（按时间/设备/动作筛选）
-
-## 建议新前端模块
+## 文件
 
 ```text
 frontend/
-├── src/views/RealtimeDashboard
-├── src/views/HistoryAndLogs
-├── src/api/realtime.ts
-└── src/store/realtime.ts
+├── index.html
+├── app.js
+├── style.css
+└── config.js
 ```
+
+## 快速运行
+
+```bash
+cd v2_workspace/frontend
+python -m http.server 5173
+```
+
+浏览器访问：
+
+- `http://127.0.0.1:5173`
+
+如果后端不是本机：
+
+- 修改 `config.js` 里的 `apiBaseUrl`

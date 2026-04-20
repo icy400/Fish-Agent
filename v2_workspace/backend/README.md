@@ -1,24 +1,44 @@
-# Backend Rebuild Entry
+# Simple Backend (FastAPI)
 
-这里作为后端重构入口，建议只负责：
+这是最简可运行后端骨架，目标是先跑通：
 
-1. 接收 Windows 上传的音频分片
-2. 调用 `../ml-core/inference` 推理
-3. 计算投喂策略状态机
-4. 对外提供实时接口（REST + SSE/WebSocket）
-5. 记录运行日志并下发设备控制指令
+1. 实时状态接口
+2. 分片上传接口
+3. 简化策略决策
+4. 运行日志
 
-## 当前保留
-
-- `config/application.example.yml`：从旧后端提取的配置样例（含中文注释）
-
-## 建议新后端模块
+## 目录
 
 ```text
 backend/
-├── src/main/java/.../controller
-├── src/main/java/.../service
-├── src/main/java/.../strategy
-├── src/main/java/.../inference
-└── src/main/resources/application.yml
+├── app/main.py
+├── config/backend_config.json
+└── requirements.txt
 ```
+
+## 快速运行
+
+```bash
+cd v2_workspace/backend
+conda create -n fish-simple python=3.10 -y
+conda activate fish-simple
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
+```
+
+## 关键接口
+
+- `GET /health`
+- `GET /realtime/start`
+- `GET /realtime/stop`
+- `GET /realtime/reset`
+- `GET /realtime/data`
+- `GET /realtime/config`
+- `POST /realtime/chunk/upload`
+
+## 推理模式
+
+`config/backend_config.json` 中：
+
+- `inference.mode = "mock"`：无需模型依赖，最快跑通
+- `inference.mode = "python_script"`：调用真实推理脚本

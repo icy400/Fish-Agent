@@ -1,0 +1,65 @@
+{
+  "_comments": {
+    "app.host": "后端监听地址，0.0.0.0 表示外部可访问",
+    "app.port": "后端监听端口",
+    "realtime.chunk_seconds": "单个音频分片时长（秒）",
+    "realtime.decision_window_size": "策略滑动窗口长度",
+    "realtime.fish_segment_threshold": "单段判定为鱼声的概率阈值",
+    "realtime.fish_type_threshold": "当前分片判定为鱼类摄食声的占比阈值",
+    "realtime.start_threshold": "触发开始投喂的窗口占比阈值",
+    "realtime.reduce_threshold": "触发减量投喂的窗口占比阈值",
+    "realtime.stop_threshold": "触发停止投喂的窗口占比阈值",
+    "realtime.start_consecutive_windows": "开始投喂所需连续命中窗口数",
+    "realtime.stop_consecutive_windows": "停止投喂所需连续命中窗口数",
+    "realtime.default_confidence": "无有效识别时的默认置信度",
+    "storage.upload_dir": "上传分片暂存目录",
+    "storage.keep_uploaded_chunks": "是否保留上传分片文件",
+    "inference.mode": "推理模式：mock 或 python_script",
+    "inference.python_command": "调用推理脚本的 Python 命令",
+    "inference.script_path": "推理脚本路径（python_script 模式必填）",
+    "logging.log_dir": "日志目录",
+    "logging.file_name": "日志文件名",
+    "logging.level": "日志级别：DEBUG/INFO/WARN/ERROR",
+    "logging.max_bytes": "单个日志文件最大字节数",
+    "logging.backup_count": "滚动日志保留份数",
+    "cors.allow_origins": "允许访问后端的前端来源列表"
+  },
+  "app": {
+    "host": "0.0.0.0",
+    "port": 8081
+  },
+  "realtime": {
+    "chunk_seconds": 6,
+    "decision_window_size": 5,
+    "fish_segment_threshold": 0.5,
+    "fish_type_threshold": 0.34,
+    "start_threshold": 0.45,
+    "reduce_threshold": 0.25,
+    "stop_threshold": 0.15,
+    "start_consecutive_windows": 2,
+    "stop_consecutive_windows": 3,
+    "default_confidence": 0.5
+  },
+  "storage": {
+    "upload_dir": "./runtime/chunks",
+    "keep_uploaded_chunks": false
+  },
+  "inference": {
+    "mode": "mock",
+    "python_command": "python",
+    "script_path": "../ml-core/inference/audio_realtime_infer.py"
+  },
+  "logging": {
+    "log_dir": "./runtime/logs",
+    "file_name": "backend.log",
+    "level": "INFO",
+    "max_bytes": 20971520,
+    "backup_count": 10
+  },
+  "cors": {
+    "allow_origins": [
+      "http://127.0.0.1:5173",
+      "http://localhost:5173"
+    ]
+  }
+}

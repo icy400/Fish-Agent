@@ -26,7 +26,23 @@ from pathlib import Path
 
 # ================== 配置 ==================
 current_dir = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(current_dir, "../model/fish_yamnet.tflite")
+
+
+def _resolve_model_path():
+    env_path = os.environ.get("FISH_MODEL_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+    candidates = [
+        os.path.join(current_dir, "../models/fish_yamnet.tflite"),
+        os.path.join(current_dir, "../model/fish_yamnet.tflite"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
+MODEL_PATH = _resolve_model_path()
 CHUNK_DURATION = 2.0
 
 # ================== 滤波 ==================
