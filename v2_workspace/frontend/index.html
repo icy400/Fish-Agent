@@ -17,6 +17,8 @@
       <article class="card"><span class="label">累计鱼声片段</span><span id="totalCount" class="value">-</span></article>
       <article class="card"><span class="label">当前分片占比</span><span id="fishRatio" class="value">-</span></article>
       <article class="card"><span class="label">窗口分片占比</span><span id="windowFishRatio" class="value">-</span></article>
+      <article class="card"><span class="label">历史基线占比</span><span id="baselineFishRatio" class="value">-</span></article>
+      <article class="card"><span class="label">相对增量</span><span id="relativeFishDelta" class="value">-</span></article>
       <article class="card"><span class="label">策略动作</span><span id="decisionAction" class="value">-</span></article>
       <article class="card"><span class="label">摄食强度</span><span id="intensity" class="value">-</span></article>
       <article class="card"><span class="label">采集代理状态</span><span id="agentStatus" class="value">-</span></article>
@@ -29,6 +31,7 @@
       <p class="meta">最近分片：<span id="lastChunkName">-</span></p>
       <p class="meta">最近设备：<span id="lastDeviceId">-</span></p>
       <p class="meta">最近时间：<span id="lastChunkAt">-</span></p>
+      <p class="meta">判断原因：<span id="strategyReason">-</span></p>
     </section>
 
     <section class="actions">
@@ -36,6 +39,36 @@
       <button id="btnStop">停止采集</button>
       <button id="btnReset">重置统计</button>
       <button id="btnRefresh">刷新状态</button>
+    </section>
+
+    <section class="panel">
+      <h2>实时频率瀑布图</h2>
+      <div class="waterfall-wrap">
+        <canvas id="waterfallCanvas" width="900" height="320"></canvas>
+        <div id="waterfallStatus" class="waterfall-status">等待音频分片</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>最近10条判断结果</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>动作</th>
+              <th>鱼声占比</th>
+              <th>窗口占比</th>
+              <th>基线</th>
+              <th>相对增量</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody id="judgmentBody">
+            <tr><td colspan="7">暂无判断结果</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="panel">

@@ -96,3 +96,47 @@ input[type="text"] {
   max-height: 280px;
   overflow: auto;
 }
+
+.waterfall-wrap {
+  position: relative;
+  min-height: 320px;
+}
+
+#waterfallCanvas {
+  display: block;
+  width: 100%;
+  height: 320px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #08121f;
+}
+
+.waterfall-status {
+  margin-top: 8px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e5e7eb;
+  padding: 8px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  color: #475569;
+  background: #f8fafc;
+  font-weight: 700;
+}

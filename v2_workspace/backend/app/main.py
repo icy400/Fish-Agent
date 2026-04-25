@@ -3,6 +3,7 @@ import logging
 import random
 import subprocess
 import time
+import wave
 from collections import deque
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -13,6 +14,11 @@ from typing import Any, Dict, List
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 
 def load_config() -> Dict[str, Any]:
@@ -54,6 +60,19 @@ def setup_logger() -> logging.Logger:
 
 
 log = setup_logger()
+
+
+def _empty_waterfall() -> Dict[str, Any]:
+    return {
+        "available": False,
+        "message": "等待音频分片",
+        "sampleRate": 0,
+        "minHz": 0,
+        "maxHz": 0,
+        "timeBins": 0,
+        "freqBins": 0,
+        "matrix": [],
+    }
 
 
 class AgentHeartbeat(BaseModel):
@@ -145,6 +164,8 @@ class RealtimeState:
         self.start_streak = 0
         self.stop_streak = 0
         self.window = deque(maxlen=int(rt_cfg["decision_window_size"]))
+        self.baseline_window = deque(maxlen=int(rt_cfg.get("relative_baseline_window_size", 20)))
+        self.judgment_history = deque(maxlen=int(rt_cfg.get("judgment_history_size", 10)))
         self.total_count = 0
         self.last_chunk_name = "-"
         self.last_chunk_at = "-"
@@ -156,6 +177,11 @@ class RealtimeState:
         self.decision_action = "WAIT"
         self.fish_ratio = 0.0
         self.window_fish_ratio = 0.0
+        self.baseline_fish_ratio = 0.0
+        self.relative_fish_delta = 0.0
+        self.feeding_peak_ratio = 0.0
+        self.strategy_reason = "WAIT"
+        self.last_waterfall = _empty_waterfall()
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -168,6 +194,10 @@ class RealtimeState:
             "decisionAction": self.decision_action,
             "fishRatio": round(self.fish_ratio, 4),
             "windowFishRatio": round(self.window_fish_ratio, 4),
+            "baselineFishRatio": round(self.baseline_fish_ratio, 4),
+            "relativeFishDelta": round(self.relative_fish_delta, 4),
+            "feedingPeakRatio": round(self.feeding_peak_ratio, 4),
+            "strategyReason": self.strategy_reason,
             "sourceMode": "Windows分片上传",
             "lastChunkAt": self.last_chunk_at,
             "lastChunkName": self.last_chunk_name,
@@ -197,6 +227,110 @@ def _window_mean(values: List[float]) -> float:
     return sum(values) / len(values)
 
 
+def _load_wav_mono(audio_path: Path):
+    if np is None:
+        raise RuntimeError("numpy is not installed")
+
+    with wave.open(str(audio_path), "rb") as wf:
+        sample_rate = wf.getframerate()
+        channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        frames = wf.readframes(wf.getnframes())
+
+    if sample_width == 1:
+        audio = np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0
+        scale = 128.0
+    elif sample_width == 2:
+        audio = np.frombuffer(frames, dtype="<i2").astype(np.float32)
+        scale = 32768.0
+    elif sample_width == 3:
+        raw = np.frombuffer(frames, dtype=np.uint8).reshape(-1, 3)
+        audio = (
+            raw[:, 0].astype(np.int32)
+            | (raw[:, 1].astype(np.int32) << 8)
+            | (raw[:, 2].astype(np.int32) << 16)
+        )
+        audio = np.where(audio & 0x800000, audio - 0x1000000, audio).astype(np.float32)
+        scale = 8388608.0
+    elif sample_width == 4:
+        audio = np.frombuffer(frames, dtype="<i4").astype(np.float32)
+        scale = 2147483648.0
+    else:
+        raise RuntimeError(f"unsupported wav sample width: {sample_width}")
+
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+
+    audio = audio / scale
+    return audio, sample_rate
+
+
+def build_waterfall(audio_path: Path) -> Dict[str, Any]:
+    spec_cfg = CONFIG.get("spectrogram", {})
+    if not bool(spec_cfg.get("enabled", True)):
+        return {**_empty_waterfall(), "message": "瀑布图已关闭"}
+    if np is None:
+        return {**_empty_waterfall(), "message": "后端未安装 numpy，无法生成瀑布图"}
+
+    try:
+        audio, sample_rate = _load_wav_mono(audio_path)
+        if audio.size == 0:
+            return {**_empty_waterfall(), "message": "音频为空"}
+
+        max_duration = float(spec_cfg.get("max_duration_seconds", 10))
+        max_samples = int(sample_rate * max_duration)
+        if max_samples > 0 and audio.size > max_samples:
+            audio = audio[-max_samples:]
+
+        fft_size = int(spec_cfg.get("fft_size", 1024))
+        time_bins = int(spec_cfg.get("time_bins", 80))
+        freq_bins = int(spec_cfg.get("freq_bins", 64))
+        min_hz = float(spec_cfg.get("min_frequency_hz", 0))
+        max_hz = float(spec_cfg.get("max_frequency_hz", 3000))
+        db_range = abs(float(spec_cfg.get("db_range", 80)))
+
+        if audio.size < fft_size:
+            audio = np.pad(audio, (0, fft_size - audio.size))
+
+        starts = np.linspace(0, max(0, audio.size - fft_size), max(1, time_bins)).astype(int)
+        window = np.hanning(fft_size).astype(np.float32)
+        freqs = np.fft.rfftfreq(fft_size, d=1.0 / sample_rate)
+        mask = (freqs >= min_hz) & (freqs <= max_hz)
+        selected_count = int(mask.sum())
+        if selected_count < 2:
+            return {**_empty_waterfall(), "message": "频率范围过窄，无法生成瀑布图"}
+
+        rows = []
+        src_x = np.arange(selected_count)
+        dst_x = np.linspace(0, selected_count - 1, max(2, freq_bins))
+        for start in starts:
+            frame = audio[start : start + fft_size]
+            if frame.size < fft_size:
+                frame = np.pad(frame, (0, fft_size - frame.size))
+            mag = np.abs(np.fft.rfft(frame * window))
+            db = 20.0 * np.log10(mag + 1e-9)
+            bands = np.interp(dst_x, src_x, db[mask])
+            rows.append(bands)
+
+        matrix = np.vstack(rows)
+        max_db = float(np.percentile(matrix, 95))
+        min_db = max_db - db_range
+        matrix = np.clip((matrix - min_db) / max(db_range, 1e-6), 0.0, 1.0)
+        return {
+            "available": True,
+            "message": "ok",
+            "sampleRate": sample_rate,
+            "minHz": int(min_hz),
+            "maxHz": int(min(max_hz, sample_rate / 2)),
+            "timeBins": int(matrix.shape[0]),
+            "freqBins": int(matrix.shape[1]),
+            "matrix": [[round(float(v), 3) for v in row] for row in matrix.tolist()],
+        }
+    except Exception as ex:
+        log.warning("waterfall_build_failed: file=%s error=%s", audio_path.name, ex)
+        return {**_empty_waterfall(), "message": f"瀑布图生成失败: {ex}"}
+
+
 def _infer_mock(file_name: str) -> Dict[str, float]:
     lower_name = file_name.lower()
     if "fish" in lower_name or "chew" in lower_name or "feed" in lower_name:
@@ -220,6 +354,7 @@ def _extract_from_python_json(payload: Dict[str, Any]) -> Dict[str, float]:
 
     fish_segments = 0
     confidence_total = 0.0
+    fish_prob_total = 0.0
     for seg in segments:
         confidence_total += float(seg.get("confidence", 0.0))
         probs = seg.get("probabilities", {})
@@ -229,18 +364,21 @@ def _extract_from_python_json(payload: Dict[str, Any]) -> Dict[str, float]:
             conf = float(seg.get("confidence", 0.0))
             fish_prob = conf if pred_cls == "fish" else 1.0 - conf
         fish_prob = max(0.0, min(1.0, float(fish_prob)))
+        fish_prob_total += fish_prob
         if fish_prob >= float(rt_cfg["fish_segment_threshold"]):
             fish_segments += 1
 
     total = len(segments)
-    fish_ratio = fish_segments / total if total > 0 else 0.0
+    fish_ratio = fish_prob_total / total if total > 0 else 0.0
     confidence = confidence_total / total if total > 0 else float(rt_cfg["default_confidence"])
     return {"fish_ratio": fish_ratio, "confidence": confidence, "fish_segments": fish_segments}
 
 
 def _infer_python_script(audio_path: Path) -> Dict[str, float]:
     infer_cfg = CONFIG["inference"]
-    script_path = Path(infer_cfg["script_path"]).resolve()
+    script_path = Path(infer_cfg["script_path"])
+    if not script_path.is_absolute():
+        script_path = (Path(__file__).resolve().parent.parent / script_path).resolve()
     cmd = [infer_cfg["python_command"], str(script_path), str(audio_path)]
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     merged = (result.stdout or "") + "\n" + (result.stderr or "")
@@ -276,6 +414,11 @@ def apply_strategy(
 ) -> Dict[str, Any]:
     rt_cfg = CONFIG["realtime"]
     prev_action = STATE.decision_action
+    baseline_values = list(STATE.baseline_window)
+    min_baseline_samples = int(rt_cfg.get("relative_min_baseline_samples", 2))
+    relative_enabled = bool(rt_cfg.get("relative_enabled", True))
+    baseline_ready = len(baseline_values) >= min_baseline_samples
+    baseline_ratio = _window_mean(baseline_values) if baseline_ready else float(rt_cfg.get("relative_default_baseline", 0.0))
 
     STATE.total_count += max(0, int(fish_segments))
     STATE.fish_ratio = fish_ratio
@@ -284,13 +427,38 @@ def apply_strategy(
 
     STATE.window.append(fish_ratio)
     STATE.window_fish_ratio = _window_mean(list(STATE.window))
+    STATE.baseline_fish_ratio = baseline_ratio
+    relative_signal_ratio = max(STATE.window_fish_ratio, fish_ratio)
+    STATE.relative_fish_delta = relative_signal_ratio - baseline_ratio
 
-    if STATE.window_fish_ratio >= float(rt_cfg["start_threshold"]):
+    absolute_start_hit = STATE.window_fish_ratio >= float(rt_cfg["start_threshold"])
+    relative_start_hit = (
+        relative_enabled
+        and baseline_ready
+        and relative_signal_ratio >= float(rt_cfg.get("relative_min_start_ratio", 0.08))
+        and STATE.relative_fish_delta >= float(rt_cfg.get("relative_start_delta", 0.08))
+    )
+    start_hit = absolute_start_hit or relative_start_hit
+
+    if start_hit:
         STATE.start_streak += 1
     else:
         STATE.start_streak = 0
 
-    if STATE.window_fish_ratio <= float(rt_cfg["stop_threshold"]):
+    if STATE.feeding_active:
+        STATE.feeding_peak_ratio = max(STATE.feeding_peak_ratio, STATE.window_fish_ratio)
+
+    peak_drop = max(0.0, STATE.feeding_peak_ratio - STATE.window_fish_ratio)
+    absolute_stop_hit = STATE.window_fish_ratio <= float(rt_cfg["stop_threshold"])
+    relative_stop_hit = (
+        relative_enabled
+        and STATE.feeding_active
+        and peak_drop >= float(rt_cfg.get("relative_stop_drop", 0.25))
+        and STATE.relative_fish_delta <= float(rt_cfg.get("relative_stop_near_baseline_delta", 0.03))
+    )
+    stop_hit = absolute_stop_hit or relative_stop_hit
+
+    if stop_hit:
         STATE.stop_streak += 1
     else:
         STATE.stop_streak = 0
@@ -299,21 +467,35 @@ def apply_strategy(
         if STATE.start_streak >= int(rt_cfg["start_consecutive_windows"]):
             STATE.feeding_active = True
             STATE.decision_action = "FEED_START"
+            STATE.feeding_peak_ratio = max(STATE.feeding_peak_ratio, STATE.window_fish_ratio)
+            STATE.strategy_reason = "relative_start" if relative_start_hit and not absolute_start_hit else "absolute_start"
         else:
             STATE.decision_action = "WAIT"
+            STATE.strategy_reason = "waiting_signal"
     else:
         if STATE.stop_streak >= int(rt_cfg["stop_consecutive_windows"]):
             STATE.feeding_active = False
             STATE.start_streak = 0
             STATE.decision_action = "FEED_STOP"
-        elif STATE.window_fish_ratio <= float(rt_cfg["reduce_threshold"]):
+            STATE.strategy_reason = "relative_stop" if relative_stop_hit and not absolute_stop_hit else "absolute_stop"
+            STATE.feeding_peak_ratio = 0.0
+        elif (
+            STATE.window_fish_ratio <= float(rt_cfg["reduce_threshold"])
+            or peak_drop >= float(rt_cfg.get("relative_reduce_drop", 0.15))
+        ):
             STATE.decision_action = "FEED_REDUCE"
+            STATE.strategy_reason = (
+                "relative_reduce"
+                if STATE.window_fish_ratio > float(rt_cfg["reduce_threshold"])
+                else "absolute_reduce"
+            )
         else:
             STATE.decision_action = "FEED_HOLD"
+            STATE.strategy_reason = "hold"
 
-    if STATE.window_fish_ratio >= float(rt_cfg["start_threshold"]):
+    if start_hit:
         STATE.intensity = "高"
-    elif STATE.window_fish_ratio >= float(rt_cfg["reduce_threshold"]):
+    elif STATE.window_fish_ratio >= float(rt_cfg["reduce_threshold"]) or STATE.relative_fish_delta >= float(rt_cfg.get("relative_start_delta", 0.08)) / 2:
         STATE.intensity = "中"
     else:
         STATE.intensity = "低"
@@ -332,14 +514,36 @@ def apply_strategy(
     STATE.last_chunk_name = chunk_name
     STATE.last_device_id = device_id or "unknown-device"
     STATE.last_chunk_at = collected_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    STATE.baseline_window.append(fish_ratio)
+
+    STATE.judgment_history.appendleft(
+        {
+            "time": STATE.last_chunk_at,
+            "chunkName": chunk_name,
+            "deviceId": STATE.last_device_id,
+            "currentType": STATE.current_type,
+            "confidence": round(confidence, 4),
+            "fishRatio": round(fish_ratio, 4),
+            "windowFishRatio": round(STATE.window_fish_ratio, 4),
+            "baselineFishRatio": round(STATE.baseline_fish_ratio, 4),
+            "relativeFishDelta": round(STATE.relative_fish_delta, 4),
+            "feedingPeakRatio": round(STATE.feeding_peak_ratio, 4),
+            "fishSegments": int(fish_segments),
+            "decisionAction": STATE.decision_action,
+            "strategyReason": STATE.strategy_reason,
+            "intensity": STATE.intensity,
+        }
+    )
 
     if STATE.decision_action != prev_action:
         log.info(
-            "action_changed: %s -> %s window_ratio=%.4f fish_ratio=%.4f",
+            "action_changed: %s -> %s window_ratio=%.4f baseline=%.4f delta=%.4f reason=%s",
             prev_action,
             STATE.decision_action,
             STATE.window_fish_ratio,
-            STATE.fish_ratio,
+            STATE.baseline_fish_ratio,
+            STATE.relative_fish_delta,
+            STATE.strategy_reason,
         )
 
     return STATE.snapshot()
@@ -356,6 +560,18 @@ def realtime_data() -> Dict[str, Any]:
         return STATE.snapshot()
 
 
+@app.get("/realtime/judgments")
+def realtime_judgments() -> Dict[str, Any]:
+    with STATE.lock:
+        return {"items": list(STATE.judgment_history)}
+
+
+@app.get("/realtime/waterfall")
+def realtime_waterfall() -> Dict[str, Any]:
+    with STATE.lock:
+        return STATE.last_waterfall
+
+
 @app.get("/realtime/config")
 def realtime_config() -> Dict[str, Any]:
     rt_cfg = CONFIG["realtime"]
@@ -368,6 +584,9 @@ def realtime_config() -> Dict[str, Any]:
         "startThreshold": rt_cfg["start_threshold"],
         "reduceThreshold": rt_cfg["reduce_threshold"],
         "stopThreshold": rt_cfg["stop_threshold"],
+        "relativeEnabled": rt_cfg.get("relative_enabled", True),
+        "relativeStartDelta": rt_cfg.get("relative_start_delta", 0.08),
+        "relativeBaselineWindowSize": rt_cfg.get("relative_baseline_window_size", 20),
         "uploadDir": str(Path(storage["upload_dir"]).resolve()),
         "keepUploadedChunks": storage["keep_uploaded_chunks"],
         "pythonCommand": infer_cfg["python_command"],
@@ -442,7 +661,9 @@ def realtime_stop() -> Dict[str, Any]:
         STATE.feeding_active = False
         STATE.start_streak = 0
         STATE.stop_streak = 0
+        STATE.feeding_peak_ratio = 0.0
         STATE.decision_action = "WAIT"
+        STATE.strategy_reason = "STOPPED"
         STATE.suggestion = "监测已暂停"
         log.info("monitor stopped")
         return {"code": 200, "msg": "监测已暂停", "data": STATE.snapshot()}
@@ -454,12 +675,19 @@ def realtime_reset() -> Dict[str, Any]:
         default_conf = float(CONFIG["realtime"]["default_confidence"])
         STATE.total_count = 0
         STATE.window.clear()
+        STATE.baseline_window.clear()
+        STATE.judgment_history.clear()
         STATE.window_fish_ratio = 0.0
         STATE.fish_ratio = 0.0
+        STATE.baseline_fish_ratio = 0.0
+        STATE.relative_fish_delta = 0.0
+        STATE.feeding_peak_ratio = 0.0
         STATE.confidence = default_conf
         STATE.current_type = "背景噪音"
         STATE.intensity = "低"
         STATE.decision_action = "WAIT"
+        STATE.strategy_reason = "RESET"
+        STATE.last_waterfall = _empty_waterfall()
         STATE.suggestion = "统计已重置"
         STATE.start_streak = 0
         STATE.stop_streak = 0
@@ -490,8 +718,10 @@ async def chunk_upload(
     log.info("chunk_received: file=%s size=%s device=%s collectedAt=%s", chunk_name, len(content), deviceId, collectedAt)
 
     try:
+        waterfall = build_waterfall(save_path)
         infer = infer_chunk(save_path)
         with STATE.lock:
+            STATE.last_waterfall = waterfall
             snapshot = apply_strategy(
                 fish_ratio=float(infer["fish_ratio"]),
                 confidence=float(infer["confidence"]),

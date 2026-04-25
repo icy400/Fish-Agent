@@ -37,6 +37,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
 - `GET /realtime/stop`
 - `GET /realtime/reset`
 - `GET /realtime/data`
+- `GET /realtime/judgments`
+- `GET /realtime/waterfall`
 - `GET /realtime/config`
 - `POST /realtime/chunk/upload`
 - `GET /agent/collect/start`（下发开始采集指令）
@@ -53,6 +55,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
 - `inference.mode = "python_script"`：调用真实推理脚本
 - `inference.script_path`：默认指向 `../ml-core/inference/audio_realtime_infer.py`
 - `agent_control.*`：Windows 代理心跳超时和轮询提示参数
+- `realtime.relative_*`：相对历史基线的投喂判断参数
+- `spectrogram.*`：实时频率瀑布图参数
 
 ## 日志文件
 
