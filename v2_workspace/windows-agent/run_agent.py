@@ -13,7 +13,7 @@ import os
 import subprocess
 import time
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -38,7 +38,6 @@ def setup_logging(cfg: Dict[str, Any], script_dir: Path):
     level_name = str(cfg.get("log_level", "INFO")).upper()
     level = getattr(logging, level_name, logging.INFO)
     log_file = resolve_path(cfg.get("log_file", "logs/windows_agent.log"), script_dir)
-    max_bytes = int(cfg.get("log_max_bytes", 20 * 1024 * 1024))
     backup_count = int(cfg.get("log_backup_count", 10))
     log_to_console = bool(cfg.get("log_to_console", True))
 
@@ -49,12 +48,14 @@ def setup_logging(cfg: Dict[str, Any], script_dir: Path):
 
     handlers = []
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = RotatingFileHandler(
+    file_handler = TimedRotatingFileHandler(
         filename=log_file,
-        maxBytes=max_bytes,
+        when="midnight",
+        interval=1,
         backupCount=backup_count,
         encoding="utf-8",
     )
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setFormatter(formatter)
     handlers.append(file_handler)
 
@@ -65,10 +66,9 @@ def setup_logging(cfg: Dict[str, Any], script_dir: Path):
 
     logging.basicConfig(level=level, handlers=handlers)
     LOGGER.info(
-        "logging ready: level=%s file=%s maxBytes=%s backupCount=%s",
+        "logging ready: level=%s file=%s rotate=daily backupCount=%s",
         level_name,
         log_file,
-        max_bytes,
         backup_count,
     )
 

@@ -76,7 +76,7 @@ python .\run_agent.py
 
 ## 日志位置
 
-- Linux 后端日志：`v2_workspace/backend/runtime/logs/backend.log`
+- Linux 后端日志：`v2_workspace/backend/logs/backend.log`
 - Windows 上传日志：`v2_workspace/windows-agent/uploader/logs/chunk_uploader.log`
 - Windows 统一代理日志：`v2_workspace/windows-agent/logs/windows_agent.log`
 

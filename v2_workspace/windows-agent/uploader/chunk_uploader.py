@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import requests
@@ -170,7 +170,6 @@ def setup_logging(cfg: dict, script_dir: Path):
     if not log_file_path.is_absolute():
         log_file_path = script_dir / log_file_path
 
-    max_bytes = int(cfg.get("log_max_bytes", 10 * 1024 * 1024))
     backup_count = int(cfg.get("log_backup_count", 5))
     log_to_console = bool(cfg.get("log_to_console", True))
 
@@ -181,12 +180,14 @@ def setup_logging(cfg: dict, script_dir: Path):
 
     handlers = []
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = RotatingFileHandler(
+    file_handler = TimedRotatingFileHandler(
         filename=log_file_path,
-        maxBytes=max_bytes,
+        when="midnight",
+        interval=1,
         backupCount=backup_count,
         encoding="utf-8",
     )
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setFormatter(formatter)
     handlers.append(file_handler)
 
@@ -197,10 +198,9 @@ def setup_logging(cfg: dict, script_dir: Path):
 
     logging.basicConfig(level=level, handlers=handlers)
     LOGGER.info(
-        "logging ready: level=%s file=%s maxBytes=%s backupCount=%s",
+        "logging ready: level=%s file=%s rotate=daily backupCount=%s",
         level_name,
         log_file_path,
-        max_bytes,
         backup_count,
     )
 

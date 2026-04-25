@@ -3,10 +3,9 @@ import logging
 import random
 import subprocess
 import time
-import wave
 from collections import deque
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List
@@ -15,15 +14,20 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-try:
-    import numpy as np
-except Exception:
-    np = None
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+CONFIG_PATH = BACKEND_DIR / "config" / "backend_config.json"
+
+
+def resolve_backend_path(path_value: str) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return (BACKEND_DIR / path).resolve()
 
 
 def load_config() -> Dict[str, Any]:
-    config_path = Path(__file__).resolve().parent.parent / "config" / "backend_config.json"
-    with config_path.open("r", encoding="utf-8") as f:
+    with CONFIG_PATH.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -32,7 +36,7 @@ CONFIG = load_config()
 
 def setup_logger() -> logging.Logger:
     log_cfg = CONFIG["logging"]
-    log_dir = Path(log_cfg["log_dir"]).resolve()
+    log_dir = resolve_backend_path(log_cfg["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     level = getattr(logging, str(log_cfg["level"]).upper(), logging.INFO)
     logger = logging.getLogger("fishfeed_backend")
@@ -44,12 +48,14 @@ def setup_logger() -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    file_handler = RotatingFileHandler(
+    file_handler = TimedRotatingFileHandler(
         filename=log_dir / log_cfg["file_name"],
-        maxBytes=int(log_cfg["max_bytes"]),
+        when="midnight",
+        interval=1,
         backupCount=int(log_cfg["backup_count"]),
         encoding="utf-8",
     )
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
@@ -60,8 +66,6 @@ def setup_logger() -> logging.Logger:
 
 
 log = setup_logger()
-EVENT_LOG = deque(maxlen=int(CONFIG.get("debug", {}).get("recent_event_limit", 200)))
-EVENT_LOG_LOCK = Lock()
 
 
 def _short_text(value: Any, limit: int = 300) -> str:
@@ -73,31 +77,9 @@ def _short_text(value: Any, limit: int = 300) -> str:
 
 def record_event(level: str, category: str, message: str, **details):
     level_name = str(level or "INFO").upper()
-    event = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "level": level_name,
-        "category": category,
-        "message": message,
-        "details": {key: _short_text(value) for key, value in details.items()},
-    }
-    with EVENT_LOG_LOCK:
-        EVENT_LOG.appendleft(event)
-
+    safe_details = {key: _short_text(value) for key, value in details.items()}
     log_method = getattr(log, level_name.lower(), log.info)
-    log_method("%s: %s details=%s", category, message, event["details"])
-
-
-def _empty_waterfall() -> Dict[str, Any]:
-    return {
-        "available": False,
-        "message": "等待音频分片",
-        "sampleRate": 0,
-        "minHz": 0,
-        "maxHz": 0,
-        "timeBins": 0,
-        "freqBins": 0,
-        "matrix": [],
-    }
+    log_method("%s: %s details=%s", category, message, safe_details)
 
 
 class AgentHeartbeat(BaseModel):
@@ -206,7 +188,6 @@ class RealtimeState:
         self.relative_fish_delta = 0.0
         self.feeding_peak_ratio = 0.0
         self.strategy_reason = "WAIT"
-        self.last_waterfall = _empty_waterfall()
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -245,7 +226,7 @@ record_event(
     "system",
     "backend initialized",
     inference_mode=CONFIG["inference"]["mode"],
-    log_file=str(Path(CONFIG["logging"]["log_dir"]).resolve() / CONFIG["logging"]["file_name"]),
+    log_file=str(resolve_backend_path(CONFIG["logging"]["log_dir"]) / CONFIG["logging"]["file_name"]),
 )
 
 
@@ -257,121 +238,6 @@ def _window_mean(values: List[float]) -> float:
     if not values:
         return 0.0
     return sum(values) / len(values)
-
-
-def _load_wav_mono(audio_path: Path):
-    if np is None:
-        raise RuntimeError("numpy is not installed")
-
-    with wave.open(str(audio_path), "rb") as wf:
-        sample_rate = wf.getframerate()
-        channels = wf.getnchannels()
-        sample_width = wf.getsampwidth()
-        frames = wf.readframes(wf.getnframes())
-
-    if sample_width == 1:
-        audio = np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0
-        scale = 128.0
-    elif sample_width == 2:
-        audio = np.frombuffer(frames, dtype="<i2").astype(np.float32)
-        scale = 32768.0
-    elif sample_width == 3:
-        raw = np.frombuffer(frames, dtype=np.uint8).reshape(-1, 3)
-        audio = (
-            raw[:, 0].astype(np.int32)
-            | (raw[:, 1].astype(np.int32) << 8)
-            | (raw[:, 2].astype(np.int32) << 16)
-        )
-        audio = np.where(audio & 0x800000, audio - 0x1000000, audio).astype(np.float32)
-        scale = 8388608.0
-    elif sample_width == 4:
-        audio = np.frombuffer(frames, dtype="<i4").astype(np.float32)
-        scale = 2147483648.0
-    else:
-        raise RuntimeError(f"unsupported wav sample width: {sample_width}")
-
-    if channels > 1:
-        audio = audio.reshape(-1, channels).mean(axis=1)
-
-    audio = audio / scale
-    return audio, sample_rate
-
-
-def build_waterfall(audio_path: Path) -> Dict[str, Any]:
-    spec_cfg = CONFIG.get("spectrogram", {})
-    if not bool(spec_cfg.get("enabled", True)):
-        record_event("INFO", "waterfall", "spectrogram disabled by config", file=audio_path.name)
-        return {**_empty_waterfall(), "message": "瀑布图已关闭"}
-    if np is None:
-        record_event("ERROR", "waterfall", "numpy is not installed", file=audio_path.name)
-        return {**_empty_waterfall(), "message": "后端未安装 numpy，无法生成瀑布图"}
-
-    try:
-        audio, sample_rate = _load_wav_mono(audio_path)
-        if audio.size == 0:
-            return {**_empty_waterfall(), "message": "音频为空"}
-
-        max_duration = float(spec_cfg.get("max_duration_seconds", 10))
-        max_samples = int(sample_rate * max_duration)
-        if max_samples > 0 and audio.size > max_samples:
-            audio = audio[-max_samples:]
-
-        fft_size = int(spec_cfg.get("fft_size", 1024))
-        time_bins = int(spec_cfg.get("time_bins", 80))
-        freq_bins = int(spec_cfg.get("freq_bins", 64))
-        min_hz = float(spec_cfg.get("min_frequency_hz", 0))
-        max_hz = float(spec_cfg.get("max_frequency_hz", 3000))
-        db_range = abs(float(spec_cfg.get("db_range", 80)))
-
-        if audio.size < fft_size:
-            audio = np.pad(audio, (0, fft_size - audio.size))
-
-        starts = np.linspace(0, max(0, audio.size - fft_size), max(1, time_bins)).astype(int)
-        window = np.hanning(fft_size).astype(np.float32)
-        freqs = np.fft.rfftfreq(fft_size, d=1.0 / sample_rate)
-        mask = (freqs >= min_hz) & (freqs <= max_hz)
-        selected_count = int(mask.sum())
-        if selected_count < 2:
-            return {**_empty_waterfall(), "message": "频率范围过窄，无法生成瀑布图"}
-
-        rows = []
-        src_x = np.arange(selected_count)
-        dst_x = np.linspace(0, selected_count - 1, max(2, freq_bins))
-        for start in starts:
-            frame = audio[start : start + fft_size]
-            if frame.size < fft_size:
-                frame = np.pad(frame, (0, fft_size - frame.size))
-            mag = np.abs(np.fft.rfft(frame * window))
-            db = 20.0 * np.log10(mag + 1e-9)
-            bands = np.interp(dst_x, src_x, db[mask])
-            rows.append(bands)
-
-        matrix = np.vstack(rows)
-        max_db = float(np.percentile(matrix, 95))
-        min_db = max_db - db_range
-        matrix = np.clip((matrix - min_db) / max(db_range, 1e-6), 0.0, 1.0)
-        record_event(
-            "DEBUG",
-            "waterfall",
-            "spectrogram generated",
-            file=audio_path.name,
-            sample_rate=sample_rate,
-            time_bins=int(matrix.shape[0]),
-            freq_bins=int(matrix.shape[1]),
-        )
-        return {
-            "available": True,
-            "message": "ok",
-            "sampleRate": sample_rate,
-            "minHz": int(min_hz),
-            "maxHz": int(min(max_hz, sample_rate / 2)),
-            "timeBins": int(matrix.shape[0]),
-            "freqBins": int(matrix.shape[1]),
-            "matrix": [[round(float(v), 3) for v in row] for row in matrix.tolist()],
-        }
-    except Exception as ex:
-        record_event("WARNING", "waterfall", "spectrogram build failed", file=audio_path.name, error=ex)
-        return {**_empty_waterfall(), "message": f"瀑布图生成失败: {ex}"}
 
 
 def _infer_mock(file_name: str) -> Dict[str, float]:
@@ -621,13 +487,6 @@ def health() -> Dict[str, Any]:
     return {"ok": True, "service": "fishfeed-simple-backend", "time": datetime.now().isoformat()}
 
 
-@app.get("/system/logs")
-def system_logs(limit: int = 80) -> Dict[str, Any]:
-    safe_limit = max(1, min(int(limit), int(CONFIG.get("debug", {}).get("recent_event_limit", 200))))
-    with EVENT_LOG_LOCK:
-        return {"items": list(EVENT_LOG)[:safe_limit]}
-
-
 @app.get("/realtime/data")
 def realtime_data() -> Dict[str, Any]:
     with STATE.lock:
@@ -638,12 +497,6 @@ def realtime_data() -> Dict[str, Any]:
 def realtime_judgments() -> Dict[str, Any]:
     with STATE.lock:
         return {"items": list(STATE.judgment_history)}
-
-
-@app.get("/realtime/waterfall")
-def realtime_waterfall() -> Dict[str, Any]:
-    with STATE.lock:
-        return STATE.last_waterfall
 
 
 @app.get("/realtime/config")
@@ -661,7 +514,7 @@ def realtime_config() -> Dict[str, Any]:
         "relativeEnabled": rt_cfg.get("relative_enabled", True),
         "relativeStartDelta": rt_cfg.get("relative_start_delta", 0.08),
         "relativeBaselineWindowSize": rt_cfg.get("relative_baseline_window_size", 20),
-        "uploadDir": str(Path(storage["upload_dir"]).resolve()),
+        "uploadDir": str(resolve_backend_path(storage["upload_dir"])),
         "keepUploadedChunks": storage["keep_uploaded_chunks"],
         "pythonCommand": infer_cfg["python_command"],
         "pythonScriptPath": infer_cfg["script_path"],
@@ -766,7 +619,6 @@ def realtime_reset() -> Dict[str, Any]:
         STATE.intensity = "低"
         STATE.decision_action = "WAIT"
         STATE.strategy_reason = "RESET"
-        STATE.last_waterfall = _empty_waterfall()
         STATE.suggestion = "统计已重置"
         STATE.start_streak = 0
         STATE.stop_streak = 0
@@ -787,7 +639,7 @@ async def chunk_upload(
             return {"code": 409, "msg": "监测未启动，请先调用 /realtime/start", "data": STATE.snapshot()}
 
     storage_cfg = CONFIG["storage"]
-    upload_dir = Path(storage_cfg["upload_dir"]).resolve()
+    upload_dir = resolve_backend_path(storage_cfg["upload_dir"])
     upload_dir.mkdir(parents=True, exist_ok=True)
     safe_name = file.filename.replace(" ", "_")
     chunk_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
@@ -806,10 +658,8 @@ async def chunk_upload(
     )
 
     try:
-        waterfall = build_waterfall(save_path)
         infer = infer_chunk(save_path)
         with STATE.lock:
-            STATE.last_waterfall = waterfall
             snapshot = apply_strategy(
                 fish_ratio=float(infer["fish_ratio"]),
                 confidence=float(infer["confidence"]),

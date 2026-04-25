@@ -38,10 +38,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
 - `GET /realtime/reset`
 - `GET /realtime/data`
 - `GET /realtime/judgments`
-- `GET /realtime/waterfall`
 - `GET /realtime/config`
 - `POST /realtime/chunk/upload`
-- `GET /system/logs`（前端运行日志面板）
 - `GET /agent/collect/start`（下发开始采集指令）
 - `GET /agent/collect/stop`（下发停止采集指令）
 - `GET /agent/control`（Windows 代理轮询）
@@ -57,10 +55,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
 - `inference.script_path`：默认指向 `../ml-core/inference/audio_realtime_infer.py`
 - `agent_control.*`：Windows 代理心跳超时和轮询提示参数
 - `realtime.relative_*`：相对历史基线的投喂判断参数
-- `spectrogram.*`：实时频率瀑布图参数
-- `debug.recent_event_limit`：前端日志面板最多保留的事件数
 
 ## 日志文件
 
-- 默认日志：`runtime/logs/backend.log`
-- 支持滚动切分（`max_bytes` + `backup_count`）
+- 默认日志：`logs/backend.log`
+- 按天切分，保留天数由 `logging.backup_count` 控制
