@@ -140,3 +140,61 @@ th {
   background: #f8fafc;
   font-weight: 700;
 }
+
+.runtime-log {
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #0b1220;
+  color: #dbeafe;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 150px 66px 1fr;
+  gap: 8px;
+  padding: 7px 9px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.log-row:last-child {
+  border-bottom: none;
+}
+
+.log-time {
+  color: #94a3b8;
+}
+
+.log-level {
+  font-weight: 700;
+}
+
+.log-message {
+  color: #e2e8f0;
+  word-break: break-word;
+}
+
+.log-error .log-level {
+  color: #fca5a5;
+}
+
+.log-warning .log-level {
+  color: #fde68a;
+}
+
+.log-info .log-level {
+  color: #93c5fd;
+}
+
+.log-debug .log-level {
+  color: #a7f3d0;
+}
+
+@media (max-width: 720px) {
+  .log-row {
+    grid-template-columns: 1fr;
+  }
+}

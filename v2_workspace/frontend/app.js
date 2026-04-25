@@ -27,6 +27,8 @@ ids.forEach((id) => (el[id] = document.getElementById(id)));
 const waterfallCanvas = document.getElementById("waterfallCanvas");
 const waterfallStatus = document.getElementById("waterfallStatus");
 const judgmentBody = document.getElementById("judgmentBody");
+const runtimeLog = document.getElementById("runtimeLog");
+let localLogItems = [];
 
 function ratioText(v) {
   if (v === undefined || v === null) return "-";
@@ -42,6 +44,15 @@ function signedRatioText(v) {
 function confText(v) {
   if (v === undefined || v === null) return "-";
   return `${(Number(v) * 100).toFixed(1)}%`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "-")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function applyData(data) {
@@ -65,6 +76,18 @@ function applyData(data) {
 function applyAgent(agent) {
   el.agentStatus.textContent = agent?.agentStatus ?? "-";
   el.collectCommand.textContent = agent?.collectEnabled ? "START" : "STOP";
+}
+
+function addLocalLog(level, category, message, details = {}) {
+  localLogItems.unshift({
+    time: new Date().toLocaleString("zh-CN", { hour12: false }),
+    level,
+    category,
+    message,
+    details,
+  });
+  localLogItems = localLogItems.slice(0, 30);
+  renderLogs({ items: localLogItems });
 }
 
 function colorForWaterfall(v) {
@@ -149,16 +172,52 @@ function renderJudgments(payload) {
     .map(
       (item) => `
         <tr>
-          <td>${item.time ?? "-"}</td>
-          <td>${item.decisionAction ?? "-"}</td>
+          <td>${escapeHtml(item.time)}</td>
+          <td>${escapeHtml(item.decisionAction)}</td>
           <td>${ratioText(item.fishRatio)}</td>
           <td>${ratioText(item.windowFishRatio)}</td>
           <td>${ratioText(item.baselineFishRatio)}</td>
           <td>${signedRatioText(item.relativeFishDelta)}</td>
-          <td>${item.strategyReason ?? "-"}</td>
+          <td>${escapeHtml(item.strategyReason)}</td>
         </tr>
       `
     )
+    .join("");
+}
+
+function formatDetails(details) {
+  if (!details || Object.keys(details).length === 0) return "";
+  return Object.entries(details)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" · ");
+}
+
+function renderLogs(payload) {
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  if (!items.length) {
+    runtimeLog.innerHTML = `
+      <div class="log-row log-info">
+        <span class="log-time">-</span>
+        <span class="log-level">INFO</span>
+        <span class="log-message">暂无运行日志</span>
+      </div>
+    `;
+    return;
+  }
+
+  runtimeLog.innerHTML = items
+    .slice(0, 80)
+    .map((item) => {
+      const level = String(item.level || "INFO").toLowerCase();
+      const details = formatDetails(item.details);
+      return `
+        <div class="log-row log-${level}">
+          <span class="log-time">${escapeHtml(item.time)}</span>
+          <span class="log-level">${escapeHtml(item.level ?? "INFO")}</span>
+          <span class="log-message">${item.category ? `[${escapeHtml(item.category)}] ` : ""}${escapeHtml(item.message)}${details ? ` · ${escapeHtml(details)}` : ""}</span>
+        </div>
+      `;
+    })
     .join("");
 }
 
@@ -170,18 +229,21 @@ async function getJSON(path) {
 
 async function loadData() {
   try {
-    const [data, agent, judgments, waterfall] = await Promise.all([
+    const [data, agent, judgments, waterfall, logs] = await Promise.all([
       getJSON("/realtime/data"),
       getJSON("/agent/state"),
       getJSON("/realtime/judgments"),
       getJSON("/realtime/waterfall"),
+      getJSON("/system/logs?limit=80"),
     ]);
     applyData(data);
     applyAgent(agent);
     renderJudgments(judgments);
     drawWaterfall(waterfall);
+    renderLogs(logs);
   } catch (err) {
     console.error(err);
+    addLocalLog("ERROR", "frontend", "接口请求失败", { error: err.message, apiBase: API_BASE });
   }
 }
 
@@ -190,6 +252,7 @@ async function callAction(path) {
     const res = await getJSON(path);
     if (res.data) applyData(res.data);
   } catch (err) {
+    addLocalLog("ERROR", "frontend", "操作请求失败", { path, error: err.message });
     alert(`请求失败: ${err.message}`);
   }
 }
@@ -202,6 +265,7 @@ async function startCollect() {
     if (control.data) applyAgent(control.data);
     await loadData();
   } catch (err) {
+    addLocalLog("ERROR", "frontend", "开始采集失败", { error: err.message });
     alert(`开始采集失败: ${err.message}`);
   }
 }
@@ -214,6 +278,7 @@ async function stopCollect() {
     if (monitor.data) applyData(monitor.data);
     await loadData();
   } catch (err) {
+    addLocalLog("ERROR", "frontend", "停止采集失败", { error: err.message });
     alert(`停止采集失败: ${err.message}`);
   }
 }
@@ -245,6 +310,7 @@ document.getElementById("uploadForm").addEventListener("submit", async (ev) => {
     if (data.data) applyData(data.data);
     await loadData();
   } catch (err) {
+    addLocalLog("ERROR", "frontend", "上传测试分片失败", { error: err.message });
     resultEl.textContent = `upload error: ${err.message}`;
   }
 });

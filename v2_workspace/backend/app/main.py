@@ -60,6 +60,31 @@ def setup_logger() -> logging.Logger:
 
 
 log = setup_logger()
+EVENT_LOG = deque(maxlen=int(CONFIG.get("debug", {}).get("recent_event_limit", 200)))
+EVENT_LOG_LOCK = Lock()
+
+
+def _short_text(value: Any, limit: int = 300) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...[truncated]"
+
+
+def record_event(level: str, category: str, message: str, **details):
+    level_name = str(level or "INFO").upper()
+    event = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "level": level_name,
+        "category": category,
+        "message": message,
+        "details": {key: _short_text(value) for key, value in details.items()},
+    }
+    with EVENT_LOG_LOCK:
+        EVENT_LOG.appendleft(event)
+
+    log_method = getattr(log, level_name.lower(), log.info)
+    log_method("%s: %s details=%s", category, message, event["details"])
 
 
 def _empty_waterfall() -> Dict[str, Any]:
@@ -215,6 +240,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+record_event(
+    "INFO",
+    "system",
+    "backend initialized",
+    inference_mode=CONFIG["inference"]["mode"],
+    log_file=str(Path(CONFIG["logging"]["log_dir"]).resolve() / CONFIG["logging"]["file_name"]),
+)
 
 
 def _safe_round(value: float) -> float:
@@ -268,8 +300,10 @@ def _load_wav_mono(audio_path: Path):
 def build_waterfall(audio_path: Path) -> Dict[str, Any]:
     spec_cfg = CONFIG.get("spectrogram", {})
     if not bool(spec_cfg.get("enabled", True)):
+        record_event("INFO", "waterfall", "spectrogram disabled by config", file=audio_path.name)
         return {**_empty_waterfall(), "message": "瀑布图已关闭"}
     if np is None:
+        record_event("ERROR", "waterfall", "numpy is not installed", file=audio_path.name)
         return {**_empty_waterfall(), "message": "后端未安装 numpy，无法生成瀑布图"}
 
     try:
@@ -316,6 +350,15 @@ def build_waterfall(audio_path: Path) -> Dict[str, Any]:
         max_db = float(np.percentile(matrix, 95))
         min_db = max_db - db_range
         matrix = np.clip((matrix - min_db) / max(db_range, 1e-6), 0.0, 1.0)
+        record_event(
+            "DEBUG",
+            "waterfall",
+            "spectrogram generated",
+            file=audio_path.name,
+            sample_rate=sample_rate,
+            time_bins=int(matrix.shape[0]),
+            freq_bins=int(matrix.shape[1]),
+        )
         return {
             "available": True,
             "message": "ok",
@@ -327,7 +370,7 @@ def build_waterfall(audio_path: Path) -> Dict[str, Any]:
             "matrix": [[round(float(v), 3) for v in row] for row in matrix.tolist()],
         }
     except Exception as ex:
-        log.warning("waterfall_build_failed: file=%s error=%s", audio_path.name, ex)
+        record_event("WARNING", "waterfall", "spectrogram build failed", file=audio_path.name, error=ex)
         return {**_empty_waterfall(), "message": f"瀑布图生成失败: {ex}"}
 
 
@@ -379,7 +422,11 @@ def _infer_python_script(audio_path: Path) -> Dict[str, float]:
     script_path = Path(infer_cfg["script_path"])
     if not script_path.is_absolute():
         script_path = (Path(__file__).resolve().parent.parent / script_path).resolve()
+    if not script_path.exists():
+        raise RuntimeError(f"inference script not found: {script_path}")
+
     cmd = [infer_cfg["python_command"], str(script_path), str(audio_path)]
+    record_event("DEBUG", "inference", "python inference started", command=" ".join(cmd), file=audio_path.name)
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     merged = (result.stdout or "") + "\n" + (result.stderr or "")
     json_line = None
@@ -388,9 +435,22 @@ def _infer_python_script(audio_path: Path) -> Dict[str, float]:
         if line.startswith("{") and line.endswith("}"):
             json_line = line
     if not json_line:
-        raise RuntimeError(f"python script returned no json, exit={result.returncode}")
+        raise RuntimeError(
+            "python script returned no json, "
+            f"exit={result.returncode}, stdout={_short_text(result.stdout)}, stderr={_short_text(result.stderr)}"
+        )
     payload = json.loads(json_line)
-    return _extract_from_python_json(payload)
+    parsed = _extract_from_python_json(payload)
+    record_event(
+        "INFO",
+        "inference",
+        "python inference finished",
+        file=audio_path.name,
+        fish_ratio=round(parsed["fish_ratio"], 4),
+        confidence=round(parsed["confidence"], 4),
+        fish_segments=parsed["fish_segments"],
+    )
+    return parsed
 
 
 def infer_chunk(audio_path: Path) -> Dict[str, float]:
@@ -399,8 +459,15 @@ def infer_chunk(audio_path: Path) -> Dict[str, float]:
         try:
             return _infer_python_script(audio_path)
         except Exception as ex:
-            log.exception("python_script inference failed; fallback to mock: file=%s", audio_path.name)
+            record_event(
+                "ERROR",
+                "inference",
+                "python inference failed; fallback to mock",
+                file=audio_path.name,
+                error=ex,
+            )
             return _infer_mock(audio_path.name)
+    record_event("WARNING", "inference", "mock inference mode is active", file=audio_path.name)
     return _infer_mock(audio_path.name)
 
 
@@ -554,6 +621,13 @@ def health() -> Dict[str, Any]:
     return {"ok": True, "service": "fishfeed-simple-backend", "time": datetime.now().isoformat()}
 
 
+@app.get("/system/logs")
+def system_logs(limit: int = 80) -> Dict[str, Any]:
+    safe_limit = max(1, min(int(limit), int(CONFIG.get("debug", {}).get("recent_event_limit", 200))))
+    with EVENT_LOG_LOCK:
+        return {"items": list(EVENT_LOG)[:safe_limit]}
+
+
 @app.get("/realtime/data")
 def realtime_data() -> Dict[str, Any]:
     with STATE.lock:
@@ -611,14 +685,19 @@ def agent_heartbeat(payload: AgentHeartbeat) -> Dict[str, Any]:
     with AGENT_STATE.lock:
         AGENT_STATE.update_heartbeat(payload)
         snapshot = AGENT_STATE.status_snapshot()
-    log.debug(
-        "agent_heartbeat: device=%s running=%s collecting=%s uploader=%s chunks=%s",
-        payload.deviceId,
-        payload.running,
-        payload.collecting,
-        payload.uploaderRunning,
-        payload.capturedChunks,
-    )
+    if payload.lastError:
+        record_event("ERROR", "agent", "windows agent heartbeat reported error", device=payload.deviceId, error=payload.lastError)
+    elif not payload.uploaderRunning:
+        record_event("WARNING", "agent", "windows uploader is not running", device=payload.deviceId, message=payload.message)
+    else:
+        log.debug(
+            "agent_heartbeat: device=%s running=%s collecting=%s uploader=%s chunks=%s",
+            payload.deviceId,
+            payload.running,
+            payload.collecting,
+            payload.uploaderRunning,
+            payload.capturedChunks,
+        )
     return {
         "code": 200,
         "msg": "heartbeat received",
@@ -632,7 +711,7 @@ def agent_collect_start() -> Dict[str, Any]:
     with AGENT_STATE.lock:
         AGENT_STATE.set_collect_enabled(True)
         snapshot = AGENT_STATE.status_snapshot()
-    log.info("agent_collect command set to START")
+    record_event("INFO", "agent", "collect command set to START", online=snapshot["online"], device=snapshot["deviceId"])
     return {"code": 200, "msg": "已下发开始采集指令", "data": snapshot}
 
 
@@ -641,7 +720,7 @@ def agent_collect_stop() -> Dict[str, Any]:
     with AGENT_STATE.lock:
         AGENT_STATE.set_collect_enabled(False)
         snapshot = AGENT_STATE.status_snapshot()
-    log.info("agent_collect command set to STOP")
+    record_event("INFO", "agent", "collect command set to STOP", online=snapshot["online"], device=snapshot["deviceId"])
     return {"code": 200, "msg": "已下发停止采集指令", "data": snapshot}
 
 
@@ -650,7 +729,7 @@ def realtime_start() -> Dict[str, Any]:
     with STATE.lock:
         STATE.running = True
         STATE.suggestion = "监测已启动，等待上传分片"
-        log.info("monitor started")
+        record_event("INFO", "monitor", "monitor started")
         return {"code": 200, "msg": "监测已启动", "data": STATE.snapshot()}
 
 
@@ -665,7 +744,7 @@ def realtime_stop() -> Dict[str, Any]:
         STATE.decision_action = "WAIT"
         STATE.strategy_reason = "STOPPED"
         STATE.suggestion = "监测已暂停"
-        log.info("monitor stopped")
+        record_event("INFO", "monitor", "monitor stopped")
         return {"code": 200, "msg": "监测已暂停", "data": STATE.snapshot()}
 
 
@@ -692,7 +771,7 @@ def realtime_reset() -> Dict[str, Any]:
         STATE.start_streak = 0
         STATE.stop_streak = 0
         STATE.feeding_active = False
-        log.info("monitor reset")
+        record_event("INFO", "monitor", "monitor reset")
         return {"code": 200, "msg": "统计已重置", "data": STATE.snapshot()}
 
 
@@ -704,6 +783,7 @@ async def chunk_upload(
 ) -> Dict[str, Any]:
     with STATE.lock:
         if not STATE.running:
+            record_event("WARNING", "upload", "chunk rejected because monitor is stopped", filename=file.filename, device=deviceId)
             return {"code": 409, "msg": "监测未启动，请先调用 /realtime/start", "data": STATE.snapshot()}
 
     storage_cfg = CONFIG["storage"]
@@ -715,7 +795,15 @@ async def chunk_upload(
 
     content = await file.read()
     save_path.write_bytes(content)
-    log.info("chunk_received: file=%s size=%s device=%s collectedAt=%s", chunk_name, len(content), deviceId, collectedAt)
+    record_event(
+        "INFO",
+        "upload",
+        "chunk received",
+        file=chunk_name,
+        size=len(content),
+        device=deviceId,
+        collected_at=collectedAt,
+    )
 
     try:
         waterfall = build_waterfall(save_path)
@@ -730,12 +818,17 @@ async def chunk_upload(
                 collected_at=collectedAt,
                 chunk_name=chunk_name,
             )
-        log.info(
-            "chunk_processed: file=%s fish_ratio=%.4f window_ratio=%.4f action=%s",
-            chunk_name,
-            snapshot["fishRatio"],
-            snapshot["windowFishRatio"],
-            snapshot["decisionAction"],
+        record_event(
+            "INFO",
+            "strategy",
+            "chunk processed",
+            file=chunk_name,
+            fish_ratio=snapshot["fishRatio"],
+            window_ratio=snapshot["windowFishRatio"],
+            baseline=snapshot["baselineFishRatio"],
+            delta=snapshot["relativeFishDelta"],
+            action=snapshot["decisionAction"],
+            reason=snapshot["strategyReason"],
         )
         return {
             "code": 200,
@@ -746,7 +839,7 @@ async def chunk_upload(
             "decisionAction": snapshot["decisionAction"],
         }
     except Exception as ex:
-        log.exception("chunk_processing_failed: file=%s", chunk_name)
+        record_event("ERROR", "upload", "chunk processing failed", file=chunk_name, error=ex)
         with STATE.lock:
             return {"code": 500, "msg": f"分片识别失败: {ex}", "data": STATE.snapshot()}
     finally:
@@ -754,4 +847,4 @@ async def chunk_upload(
             try:
                 save_path.unlink(missing_ok=True)
             except Exception:
-                log.warning("chunk_delete_failed: file=%s", save_path)
+                record_event("WARNING", "upload", "chunk delete failed", file=save_path)
