@@ -20,6 +20,11 @@ const ids = [
   "lastDeviceId",
   "agentStatus",
   "collectCommand",
+  "uploaderStatus",
+  "capturedChunks",
+  "lastHeartbeatAt",
+  "agentMessage",
+  "lastError",
 ];
 
 const el = {};
@@ -72,6 +77,27 @@ function applyData(data) {
 function applyAgent(agent) {
   el.agentStatus.textContent = agent?.agentStatus ?? "-";
   el.collectCommand.textContent = agent?.collectEnabled ? "START" : "STOP";
+  el.uploaderStatus.textContent = agent?.uploaderRunning ? "运行中" : "未运行";
+  el.capturedChunks.textContent = agent?.capturedChunks ?? "-";
+  el.lastHeartbeatAt.textContent = agent?.lastHeartbeatAt ?? "-";
+  el.agentMessage.textContent = agent?.message || "-";
+  el.lastError.textContent = agent?.lastError || "-";
+
+  if (agent?.collectEnabled && !agent?.online) {
+    el.suggestion.textContent = "后端已启动，但 Windows 采集代理离线；请在 Windows 上运行 run_agent.py。";
+    return;
+  }
+  if (agent?.collectEnabled && agent?.online && !agent?.uploaderRunning) {
+    el.suggestion.textContent = "Windows 代理在线，但上传器未运行；请查看 windows-agent 日志。";
+    return;
+  }
+  if (agent?.collectEnabled && agent?.lastError) {
+    el.suggestion.textContent = `Windows 采集异常：${agent.lastError}`;
+    return;
+  }
+  if (agent?.collectEnabled && agent?.online && Number(agent?.capturedChunks || 0) === 0) {
+    el.suggestion.textContent = "Windows 代理已收到开始指令，正在等待第一个音频分片生成。";
+  }
 }
 
 function renderJudgments(payload) {

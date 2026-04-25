@@ -55,6 +55,10 @@ h1 {
   color: #4b5563;
 }
 
+.warning {
+  color: #b45309;
+}
+
 .actions {
   margin-top: 14px;
   display: flex;

@@ -8,6 +8,7 @@ Unified Windows agent:
 """
 
 import json
+import locale
 import logging
 import os
 import subprocess
@@ -32,6 +33,14 @@ def resolve_path(path_str: str, base_dir: Path) -> Path:
     if path.is_absolute():
         return path
     return (base_dir / path).resolve()
+
+
+def tail_text(text: str, limit: int = 3000) -> str:
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return "...[truncated]\n" + text[-limit:]
 
 
 def setup_logging(cfg: Dict[str, Any], script_dir: Path):
@@ -125,6 +134,7 @@ def start_capture_once(cfg: Dict[str, Any], script_dir: Path, output_path: Path)
     capture_script = resolve_path(cfg["capture_script_path"], script_dir)
     python_cmd = str(cfg.get("python_command", "python"))
     chunk_seconds = float(cfg.get("capture_chunk_seconds", 6))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         python_cmd,
         str(capture_script),
@@ -136,7 +146,16 @@ def start_capture_once(cfg: Dict[str, Any], script_dir: Path, output_path: Path)
     env_key = str(cfg.get("capture_output_env_var", "HYDROPHONE_WAVE_FILE_PATH"))
     env[env_key] = str(output_path)
     LOGGER.info("starting capture process: %s output=%s", " ".join(cmd), output_path)
-    return subprocess.Popen(cmd, cwd=str(capture_script.parent), env=env)
+    return subprocess.Popen(
+        cmd,
+        cwd=str(capture_script.parent),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding=locale.getpreferredencoding(False),
+        errors="replace",
+    )
 
 
 def stop_process(proc: subprocess.Popen, name: str, timeout_seconds: float = 3.0):
@@ -212,6 +231,12 @@ def main():
     output_dir = get_capture_output_dir(cfg, script_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     LOGGER.info("capture output dir: %s", output_dir)
+    capture_script = resolve_path(cfg["capture_script_path"], script_dir)
+    capture_dll = capture_script.parent / "BRC2.dll"
+    LOGGER.info("capture script: %s exists=%s", capture_script, capture_script.exists())
+    LOGGER.info("capture dll: %s exists=%s", capture_dll, capture_dll.exists())
+    LOGGER.info("backend control url: %s", build_url(cfg, "control_path"))
+    LOGGER.info("backend heartbeat url: %s", build_url(cfg, "heartbeat_path"))
 
     uploader_proc = start_uploader_process(cfg, script_dir)
     capture_proc: Optional[subprocess.Popen] = None
@@ -228,6 +253,17 @@ def main():
             # Update capture process status.
             if capture_proc is not None and capture_proc.poll() is not None:
                 rc = capture_proc.returncode
+                stdout_text = ""
+                stderr_text = ""
+                try:
+                    stdout_text, stderr_text = capture_proc.communicate(timeout=1)
+                except Exception as ex:
+                    LOGGER.warning("read capture output failed: %s", ex)
+                if stdout_text.strip():
+                    LOGGER.info("capture stdout tail:\n%s", tail_text(stdout_text.strip()))
+                if stderr_text.strip():
+                    LOGGER.warning("capture stderr tail:\n%s", tail_text(stderr_text.strip()))
+
                 if rc == 0 and current_output is not None and current_output.exists():
                     captured_chunks += 1
                     status_message = f"captured chunk: {current_output.name}"
