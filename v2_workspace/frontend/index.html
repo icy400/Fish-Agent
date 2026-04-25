@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fish Feed Simple Dashboard</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>鱼群声学监测 · 简易面板</h1>
+
+    <section class="cards">
+      <article class="card"><span class="label">运行状态</span><span id="status" class="value">-</span></article>
+      <article class="card"><span class="label">当前识别</span><span id="currentType" class="value">-</span></article>
+      <article class="card"><span class="label">当前置信度</span><span id="confidence" class="value">-</span></article>
+      <article class="card"><span class="label">累计鱼声片段</span><span id="totalCount" class="value">-</span></article>
+      <article class="card"><span class="label">当前分片占比</span><span id="fishRatio" class="value">-</span></article>
+      <article class="card"><span class="label">窗口分片占比</span><span id="windowFishRatio" class="value">-</span></article>
+      <article class="card"><span class="label">历史基线占比</span><span id="baselineFishRatio" class="value">-</span></article>
+      <article class="card"><span class="label">相对增量</span><span id="relativeFishDelta" class="value">-</span></article>
+      <article class="card"><span class="label">策略动作</span><span id="decisionAction" class="value">-</span></article>
+      <article class="card"><span class="label">摄食强度</span><span id="intensity" class="value">-</span></article>
+      <article class="card"><span class="label">采集代理状态</span><span id="agentStatus" class="value">-</span></article>
+      <article class="card"><span class="label">采集指令</span><span id="collectCommand" class="value">-</span></article>
+      <article class="card"><span class="label">上传器状态</span><span id="uploaderStatus" class="value">-</span></article>
+      <article class="card"><span class="label">已采集分片</span><span id="capturedChunks" class="value">-</span></article>
+    </section>
+
+    <section class="panel">
+      <h2>建议</h2>
+      <p id="suggestion">-</p>
+      <p class="meta">最近分片：<span id="lastChunkName">-</span></p>
+      <p class="meta">最近设备：<span id="lastDeviceId">-</span></p>
+      <p class="meta">最近时间：<span id="lastChunkAt">-</span></p>
+      <p class="meta">判断原因：<span id="strategyReason">-</span></p>
+      <p class="meta">Windows 心跳：<span id="lastHeartbeatAt">-</span></p>
+      <p class="meta">Windows 状态：<span id="agentMessage">-</span></p>
+      <p class="meta warning">Windows 错误：<span id="lastError">-</span></p>
+    </section>
+
+    <section class="actions">
+      <button id="btnStart">开始采集</button>
+      <button id="btnStop">停止采集</button>
+      <button id="btnReset">重置统计</button>
+      <button id="btnRefresh">刷新状态</button>
+    </section>
+
+    <section class="panel">
+      <h2>最近10条判断结果</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>动作</th>
+              <th>鱼声占比</th>
+              <th>窗口占比</th>
+              <th>基线</th>
+              <th>相对增量</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody id="judgmentBody">
+            <tr><td colspan="7">暂无判断结果</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>上传测试分片</h2>
+      <form id="uploadForm">
+        <input id="audioFile" type="file" accept=".wav,.mp3,.flac,.ogg,.m4a" required />
+        <input id="deviceId" type="text" value="debug-device-01" placeholder="deviceId" />
+        <button type="submit">上传分片</button>
+      </form>
+      <pre id="uploadResult"></pre>
+    </section>
+  </main>
+
+  <script src="./config.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
