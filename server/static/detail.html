@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分析详情 — Fish Agent</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a href="/">文件列表</a>
+  <a href="/upload.html">上传文件</a>
+</nav>
+
+<div class="container">
+  <div class="header"><h1 id="page-title">分析详情</h1></div>
+  <div id="content"><div class="loading">加载中...</div></div>
+</div>
+
+<script>
+const id = new URLSearchParams(location.search).get('id');
+if (!id) location.href = '/';
+
+async function load() {
+  try {
+    const res = await fetch(`/api/files/${id}`);
+    const f = await res.json();
+    const r = f.result;
+
+    document.getElementById('page-title').textContent = f.original_name;
+
+    let html = '';
+
+    if (r && r.segments) {
+      const ratioPct = (r.fish_chewing_ratio * 100).toFixed(1);
+      const feed = r.feeding || {};
+
+      // stats
+      html += `<div class="stats">
+        <div class="stat-card"><div class="label">总时长</div><div class="value">${r.total_duration.toFixed(1)}s</div></div>
+        <div class="stat-card"><div class="label">总片段数</div><div class="value">${r.total_segments}</div></div>
+        <div class="stat-card"><div class="label">鱼声片段</div><div class="value fish">${r.fish_chewing_count}</div></div>
+        <div class="stat-card"><div class="label">鱼声占比</div><div class="value ${r.fish_chewing_ratio >= 0.08 ? 'high' : ''}">${ratioPct}%</div></div>
+        <div class="stat-card"><div class="label">上传时间</div><div class="value" style="font-size:14px">${(f.upload_time||'').substring(0,16)}</div></div>
+      </div>`;
+
+      // feeding recommendation
+      html += `<div class="card feeding-card">
+        <h2>投喂建议</h2>
+        <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center">
+          <div><span style="color:#6b7280">建议投喂量：</span><span style="font-size:22px;font-weight:bold;color:#059669">${feed.amount_kg} kg</span></div>
+          <div><span style="color:#6b7280">进食强度：</span><span style="font-size:18px;font-weight:bold;color:#dc2626">${feed.level}</span></div>
+          <div style="flex:1;min-width:200px;padding:10px 14px;background:#fff;border-radius:8px;color:#374151;font-size:15px">${feed.message}</div>
+        </div>
+      </div>`;
+
+      // segment timeline
+      const barCount = r.segments.length;
+      const barWidth = barCount > 200 ? 2 : barCount > 100 ? 3 : 6;
+      html += `<div class="card"><h2>时序图 (${barCount} 段，绿色=鱼声，灰=背景)</h2>
+        <div class="timeline">`;
+      for (let i = 0; i < r.segments.length; i++) {
+        const s = r.segments[i];
+        const cls = s.predicted_class === 'fish' ? 'bar-fish' : 'bar-bg';
+        const title = `${s.time_start}-${s.time_end}s ${s.predicted_class} ${(s.confidence*100).toFixed(0)}%`;
+        html += `<div class="bar ${cls}" style="width:${barWidth}px" title="${title}"></div>`;
+      }
+      html += `</div></div>`;
+
+      // merged fish segments
+      if (r.fish_chewing_segments && r.fish_chewing_segments.length > 0) {
+        html += `<div class="card"><h2>鱼声连续段 (${r.fish_chewing_segments.length}段)</h2>
+          <div class="seg-scroll"><table><thead><tr><th>开始</th><th>结束</th><th>持续</th></tr></thead><tbody>`;
+        for (const seg of r.fish_chewing_segments) {
+          html += `<tr><td>${seg.time_start}s</td><td>${seg.time_end}s</td><td>${(seg.time_end - seg.time_start).toFixed(1)}s</td></tr>`;
+        }
+        html += `</tbody></table></div></div>`;
+      }
+
+      // all segments detail
+      html += `<div class="card"><h2>全部分段详情</h2>
+        <div class="seg-scroll"><table><thead><tr><th>开始</th><th>结束</th><th>类别</th><th>置信度</th><th>背景概率</th><th>鱼声概率</th></tr></thead><tbody>`;
+      for (const s of r.segments) {
+        const isFish = s.predicted_class === 'fish';
+        html += `<tr>
+          <td>${s.time_start}s</td><td>${s.time_end}s</td>
+          <td style="color:${isFish ? '#059669' : '#6b7280'};font-weight:600">${isFish ? '鱼吃食' : '背景'}</td>
+          <td>${(s.confidence*100).toFixed(1)}%</td>
+          <td>${(s.probabilities.background*100).toFixed(1)}%</td>
+          <td>${(s.probabilities.fish*100).toFixed(1)}%</td>
+        </tr>`;
+      }
+      html += `</tbody></table></div></div>`;
+
+    } else {
+      html += `<div class="card"><div class="empty">
+        ${f.status === 'uploaded' || f.status === 'analyzing' ? '分析进行中...' : '暂无分析结果'}
+      </div></div>`;
+    }
+
+    // actions
+    html += `<div style="margin-top:16px;display:flex;gap:10px">
+      <a href="/api/files/${id}/download" class="btn btn-primary">下载原始音频</a>
+      <button class="btn btn-success" onclick="reanalyze()">重新分析</button>
+      <button class="btn btn-danger" onclick="del()">删除</button>
+      <a href="/" class="btn" style="background:#6b7280;color:#fff">返回列表</a>
+    </div>`;
+
+    document.getElementById('content').innerHTML = html;
+  } catch (e) {
+    document.getElementById('content').innerHTML = '<div class="card"><div class="empty">加载失败</div></div>';
+  }
+}
+
+async function reanalyze() {
+  const btn = event.target;
+  btn.textContent = '分析中...'; btn.disabled = true;
+  try {
+    await fetch(`/api/files/${id}/analyze`, { method: 'POST' });
+    location.reload();
+  } catch (e) {
+    alert('分析失败');
+    btn.textContent = '重新分析'; btn.disabled = false;
+  }
+}
+
+async function del() {
+  if (!confirm('确定删除？')) return;
+  await fetch(`/api/files/${id}`, { method: 'DELETE' });
+  location.href = '/';
+}
+
+load();
+</script>
+</body>
+</html>

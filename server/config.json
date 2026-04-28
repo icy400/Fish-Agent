@@ -1,0 +1,24 @@
+{
+  "audio_settings": {
+    "sample_rate": 22050,
+    "chunk_duration": 2.0,
+    "n_mfcc": 13,
+    "n_fft": 2048,
+    "hop_length": 512,
+    "time_steps": 128
+  },
+  "filter_settings": {
+    "lowpass_cutoff_hz": 500,
+    "lowpass_order": 4
+  },
+  "model_settings": {
+    "model_file": "fish_yamnet.tflite",
+    "input_shape": [1, 128, 13]
+  },
+  "classes": ["background", "fish"],
+  "feeding_logic": {
+    "high_threshold": 0.15,
+    "medium_threshold": 0.08,
+    "low_threshold": 0.03
+  }
+}

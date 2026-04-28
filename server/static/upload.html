@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>上传文件 — Fish Agent</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a href="/">文件列表</a>
+  <a href="/upload.html" class="active">上传文件</a>
+</nav>
+
+<div class="container">
+  <div class="header"><h1>上传音频文件</h1></div>
+
+  <div class="card">
+    <div class="upload-zone" id="drop-zone">
+      <p style="font-size:36px">🎤</p>
+      <p style="font-weight:600">拖入音频文件或点击选择</p>
+      <p>支持 WAV / MP3 / FLAC 格式</p>
+      <input type="file" id="file-input" accept="audio/wav,audio/mpeg,audio/flac" style="display:none">
+    </div>
+
+    <div id="file-info" style="display:none;margin-top:16px">
+      <p>已选择：<strong id="file-name"></strong> (<span id="file-size"></span>)</p>
+      <button class="btn btn-primary" id="upload-btn" style="margin-top:8px">开始上传并分析</button>
+    </div>
+
+    <div id="progress" style="display:none;margin-top:12px">
+      <p style="font-size:13px;color:#6b7280" id="progress-text">上传中...</p>
+      <div class="progress-bar"><div class="fill" id="progress-fill"></div></div>
+    </div>
+
+    <div id="result" style="display:none;margin-top:16px"></div>
+  </div>
+</div>
+
+<script>
+const zone = document.getElementById('drop-zone');
+const input = document.getElementById('file-input');
+const fileInfo = document.getElementById('file-info');
+const progress = document.getElementById('progress');
+let selectedFile = null;
+
+zone.addEventListener('click', () => input.click());
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+zone.addEventListener('drop', e => {
+  e.preventDefault();
+  zone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) selectFile(e.dataTransfer.files[0]);
+});
+input.addEventListener('change', () => {
+  if (input.files.length) selectFile(input.files[0]);
+});
+
+function selectFile(file) {
+  selectedFile = file;
+  document.getElementById('file-name').textContent = file.name;
+  document.getElementById('file-size').textContent = (file.size / 1024 / 1024).toFixed(1) + ' MB';
+  fileInfo.style.display = 'block';
+  progress.style.display = 'none';
+  document.getElementById('result').style.display = 'none';
+}
+
+document.getElementById('upload-btn').addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  const formData = new FormData();
+  formData.append('file', selectedFile);
+
+  progress.style.display = 'block';
+  document.getElementById('progress-text').textContent = '上传中...';
+  document.getElementById('progress-fill').style.width = '0%';
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/files/upload');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded / e.total * 100);
+      document.getElementById('progress-fill').style.width = pct + '%';
+      document.getElementById('progress-text').textContent = `上传中 ${pct}%`;
+    }
+  };
+
+  xhr.onload = () => {
+    const res = JSON.parse(xhr.responseText);
+    progress.style.display = 'none';
+    const div = document.getElementById('result');
+    div.style.display = 'block';
+
+    if (res.status === 'analyzed') {
+      div.innerHTML = `
+        <div class="card feeding-card">
+          <p style="font-size:16px;font-weight:600;color:#065f46">分析完成</p>
+          <p>鱼声片段数：<strong>${res.fish_count}</strong> | 投喂强度：<strong>${res.feeding_level}</strong></p>
+          <a href="/detail.html?id=${res.id}" class="btn btn-primary" style="margin-top:8px">查看详细结果</a>
+        </div>`;
+    } else if (res.status === 'error') {
+      div.innerHTML = `<div class="card" style="border:1px solid #fca5a5"><p style="color:#dc2626">分析失败：${res.error}</p></div>`;
+    } else {
+      div.innerHTML = `<div class="card"><p>上传成功，分析中...</p><a href="/detail.html?id=${res.id}" class="btn btn-primary">查看</a></div>`;
+    }
+  };
+
+  xhr.onerror = () => {
+    progress.style.display = 'none';
+    document.getElementById('result').style.display = 'block';
+    document.getElementById('result').innerHTML = '<div class="card" style="border:1px solid #fca5a5"><p style="color:#dc2626">上传失败，请检查服务器连接</p></div>';
+  };
+
+  xhr.send(formData);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fish Agent — 投喂监测</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a href="/" class="active">文件列表</a>
+  <a href="/upload.html">上传文件</a>
+</nav>
+
+<div class="container">
+  <div class="header"><h1>水产养殖精准投喂系统</h1></div>
+
+  <div class="card">
+    <h2>音频文件列表</h2>
+    <div id="status-bar" style="margin-bottom:12px;font-size:13px;color:#6b7280">加载中...</div>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>文件名</th><th>来源</th><th>时长</th><th>鱼声数</th><th>投喂建议</th><th>状态</th><th>时间</th><th>操作</th></tr>
+      </thead>
+      <tbody id="list-body"><tr><td colspan="9" class="loading">加载中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API = '/api/files';
+
+function statusClass(s) {
+  const map = { uploaded: 'status-uploaded', analyzing: 'status-analyzing', analyzed: 'status-analyzed', error: 'status-error' };
+  return map[s] || '';
+}
+function statusText(s) {
+  const map = { uploaded: '已上传', analyzing: '分析中', analyzed: '已分析', error: '失败' };
+  return map[s] || s;
+}
+
+async function loadList() {
+  document.getElementById('status-bar').textContent = '加载中...';
+  try {
+    const res = await fetch(API);
+    const data = await res.json();
+    const tbody = document.getElementById('list-body');
+
+    if (!data.files || data.files.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无文件，请上传音频文件</td></tr>';
+      document.getElementById('status-bar').textContent = '共 0 条';
+      return;
+    }
+
+    tbody.innerHTML = data.files.map(f => `
+      <tr>
+        <td>${f.id}</td>
+        <td><a href="/detail.html?id=${f.id}" style="color:#0284c7;text-decoration:none;font-weight:500">${f.original_name}</a></td>
+        <td>${f.source === 'hydrophone' ? '水听器' : '手动'}</td>
+        <td>${f.duration ? f.duration.toFixed(0) + 's' : '-'}</td>
+        <td style="color:#059669;font-weight:600">${f.fish_count || '-'}</td>
+        <td>${f.feeding_message || '-'}</td>
+        <td><span class="status ${statusClass(f.status)}">${statusText(f.status)}</span></td>
+        <td>${(f.upload_time || '').substring(5, 16)}</td>
+        <td>
+          <a href="/detail.html?id=${f.id}" class="btn btn-primary btn-sm">查看</a>
+          <button class="btn btn-danger btn-sm" onclick="del(${f.id})">删除</button>
+        </td>
+      </tr>
+    `).join('');
+
+    document.getElementById('status-bar').textContent = `共 ${data.total} 条`;
+  } catch (e) {
+    document.getElementById('list-body').innerHTML = '<tr><td colspan="9" class="empty">加载失败</td></tr>';
+  }
+}
+
+async function del(id) {
+  if (!confirm('确定删除该文件及分析结果？')) return;
+  await fetch(`${API}/${id}`, { method: 'DELETE' });
+  loadList();
+}
+
+loadList();
+</script>
+</body>
+</html>

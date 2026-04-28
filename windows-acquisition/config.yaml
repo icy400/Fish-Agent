@@ -1,0 +1,18 @@
+# Fish Agent — Windows 采集卡配置文件
+acquisition:
+  sample_rate: 100000     # 采样率 Hz
+  channel: 0              # 采集通道 0=CH1, 1=CH2, 2=CH3, 3=CH4
+  volt_range: 2           # 电压量程 (±2.5V)
+  refer_volt: 4096        # 参考电压
+  iepe_mode: 0            # 普通ADC模式
+  buffer_size: 1000       # 每次读取点数
+
+output:
+  directory: "D:\\fish_audio"   # 保存目录
+  bit_depth: 16
+
+upload:
+  enabled: true                 # 采集完成后自动上传
+  server_url: "http://192.168.1.100:8081"   # Linux 服务器地址
+  retry_max: 3
+  retry_delay_sec: 5
