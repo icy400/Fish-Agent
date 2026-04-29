@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 from sqlite3 import IntegrityError
 
@@ -184,6 +185,58 @@ class RealtimeDatabaseTests(unittest.TestCase):
         self.assertEqual(session["client_failed_retryable_chunks"], 2)
         self.assertEqual(session["client_failed_conflict_chunks"], 1)
         self.assertEqual(session["client_status"], "uploading_backlog")
+
+    def test_init_db_migrates_legacy_realtime_sessions_client_last_sequence(self):
+        db_path = str(Path(self.tmp.name) / "legacy.db")
+        with sqlite3.connect(db_path) as db:
+            db.execute("""
+                CREATE TABLE realtime_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id TEXT NOT NULL,
+                    name TEXT,
+                    status TEXT NOT NULL,
+                    chunk_duration REAL DEFAULT 2.0,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    stopped_at TEXT,
+                    last_chunk_at TEXT,
+                    last_heartbeat_at TEXT,
+                    client_pending_chunks INTEGER DEFAULT 0,
+                    client_failed_retryable_chunks INTEGER DEFAULT 0,
+                    client_failed_conflict_chunks INTEGER DEFAULT 0,
+                    client_status TEXT DEFAULT 'unknown',
+                    density_60s REAL DEFAULT 0,
+                    completeness_60s REAL DEFAULT 0,
+                    feeding_level TEXT,
+                    feeding_amount REAL DEFAULT 0,
+                    feeding_message TEXT,
+                    feeding_confidence TEXT DEFAULT 'insufficient',
+                    health_status TEXT DEFAULT 'waiting',
+                    health_message TEXT
+                )
+            """)
+            db.execute(
+                """INSERT INTO realtime_sessions
+                   (client_id, name, status, chunk_duration, created_at, started_at)
+                   VALUES ('client-1', 'pond-a', 'running', 2.0, '2026-04-29 10:00:00', '2026-04-29 10:00:00')"""
+            )
+            db.commit()
+
+        database.init_db(db_path)
+        result = database.update_realtime_heartbeat(
+            session_id=1,
+            client_id="client-1",
+            last_sequence=12,
+            pending_chunks=4,
+            failed_retryable_chunks=2,
+            failed_conflict_chunks=1,
+            client_status="uploading_backlog",
+            message="正在补传历史分片",
+        )
+
+        session = database.get_realtime_session(1)
+        self.assertEqual(result, True)
+        self.assertEqual(session["client_last_sequence"], 12)
 
     def test_update_realtime_heartbeat_returns_true_for_matching_session_and_client(self):
         session_id = database.create_realtime_session("client-1", "pond-a", 2.0)

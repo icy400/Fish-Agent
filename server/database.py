@@ -83,6 +83,13 @@ def init_db(path):
                 UNIQUE(session_id, sequence)
             )
         """)
+        realtime_session_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(realtime_sessions)").fetchall()
+        }
+        if "client_last_sequence" not in realtime_session_columns:
+            db.execute(
+                "ALTER TABLE realtime_sessions ADD COLUMN client_last_sequence INTEGER DEFAULT 0"
+            )
         db.execute("""
             CREATE INDEX IF NOT EXISTS idx_realtime_segments_session_captured
             ON realtime_segments(session_id, captured_at)
