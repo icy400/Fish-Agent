@@ -153,6 +153,19 @@ class RealtimeDatabaseTests(unittest.TestCase):
         self.assertEqual(session["density_60s"], 0.1)
         self.assertEqual(session["feeding_level"], "medium")
 
+    def test_update_segment_analysis_returns_false_for_missing_segment(self):
+        result = database.update_realtime_segment_analysis(
+            segment_id=999,
+            predicted_class="fish",
+            confidence=0.91,
+            fish_probability=0.91,
+            background_probability=0.09,
+            density_60s=0.1,
+            completeness_60s=0.9,
+            feeding={"level": "medium", "amount_kg": 0.5, "message": "进食正常，建议标准投喂", "confidence": "normal"},
+        )
+        self.assertEqual(result, False)
+
     def test_update_realtime_heartbeat_updates_client_queue_counts(self):
         session_id = database.create_realtime_session("client-1", "pond-a", 2.0)
         database.update_realtime_heartbeat(
@@ -166,10 +179,52 @@ class RealtimeDatabaseTests(unittest.TestCase):
             message="正在补传历史分片",
         )
         session = database.get_realtime_session(session_id)
+        self.assertEqual(session["client_last_sequence"], 12)
         self.assertEqual(session["client_pending_chunks"], 4)
         self.assertEqual(session["client_failed_retryable_chunks"], 2)
         self.assertEqual(session["client_failed_conflict_chunks"], 1)
         self.assertEqual(session["client_status"], "uploading_backlog")
+
+    def test_update_realtime_heartbeat_returns_true_for_matching_session_and_client(self):
+        session_id = database.create_realtime_session("client-1", "pond-a", 2.0)
+        result = database.update_realtime_heartbeat(
+            session_id=session_id,
+            client_id="client-1",
+            last_sequence=12,
+            pending_chunks=4,
+            failed_retryable_chunks=2,
+            failed_conflict_chunks=1,
+            client_status="uploading_backlog",
+            message="正在补传历史分片",
+        )
+        self.assertEqual(result, True)
+
+    def test_update_realtime_heartbeat_returns_false_for_mismatched_client(self):
+        session_id = database.create_realtime_session("client-1", "pond-a", 2.0)
+        result = database.update_realtime_heartbeat(
+            session_id=session_id,
+            client_id="client-2",
+            last_sequence=12,
+            pending_chunks=4,
+            failed_retryable_chunks=2,
+            failed_conflict_chunks=1,
+            client_status="uploading_backlog",
+            message="正在补传历史分片",
+        )
+        self.assertEqual(result, False)
+
+    def test_update_realtime_heartbeat_returns_false_for_missing_session(self):
+        result = database.update_realtime_heartbeat(
+            session_id=999,
+            client_id="client-1",
+            last_sequence=12,
+            pending_chunks=4,
+            failed_retryable_chunks=2,
+            failed_conflict_chunks=1,
+            client_status="uploading_backlog",
+            message="正在补传历史分片",
+        )
+        self.assertEqual(result, False)
 
 
 if __name__ == "__main__":

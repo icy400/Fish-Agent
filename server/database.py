@@ -41,6 +41,7 @@ def init_db(path):
                 stopped_at TEXT,
                 last_chunk_at TEXT,
                 last_heartbeat_at TEXT,
+                client_last_sequence INTEGER DEFAULT 0,
                 client_pending_chunks INTEGER DEFAULT 0,
                 client_failed_retryable_chunks INTEGER DEFAULT 0,
                 client_failed_conflict_chunks INTEGER DEFAULT 0,
@@ -312,12 +313,14 @@ def update_realtime_heartbeat(session_id, client_id, last_sequence, pending_chun
     with get_conn() as db:
         db.execute(
             """UPDATE realtime_sessions
-               SET last_heartbeat_at=?, client_pending_chunks=?, client_failed_retryable_chunks=?,
-                   client_failed_conflict_chunks=?, client_status=?, health_status=?,
+               SET last_heartbeat_at=?, client_last_sequence=?, client_pending_chunks=?,
+                   client_failed_retryable_chunks=?, client_failed_conflict_chunks=?,
+                   client_status=?, health_status=?,
                    health_message=?
                WHERE id=? AND client_id=?""",
             (
                 now,
+                last_sequence,
                 pending_chunks,
                 failed_retryable_chunks,
                 failed_conflict_chunks,
