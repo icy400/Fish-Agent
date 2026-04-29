@@ -150,3 +150,16 @@ class RealtimeUploadClient:
                 metadata=metadata,
             ))
         return items
+
+
+def create_session(server_url, client_id, name, chunk_duration=2.0, http=None):
+    if http is None and requests is None:
+        raise RuntimeError("缺少 requests 依赖，请先安装: pip install requests")
+    http = http or requests
+    response = http.post(
+        f"{server_url.rstrip('/')}/api/realtime/sessions",
+        json={"client_id": client_id, "name": name, "chunk_duration": chunk_duration},
+        timeout=(10, 30),
+    )
+    response.raise_for_status()
+    return response.json()

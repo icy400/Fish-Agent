@@ -32,6 +32,7 @@ cfg = load_config()
 acq = cfg.get("acquisition", {})
 out = cfg.get("output", {})
 upload_cfg = cfg.get("upload", {})
+realtime_cfg = cfg.get("realtime", {})
 
 SAMPLE_RATE = acq.get("sample_rate", 100000)
 COLLECT_CHANNEL = acq.get("channel", 0)
@@ -181,6 +182,52 @@ def get_output_path(custom_path=None):
     return os.path.join(OUTPUT_DIR, f"fish_{ts}.wav")
 
 
+def run_realtime_mode(args):
+    import threading
+    from realtime_uploader import RealtimeQueue, RealtimeUploadClient, create_session
+
+    server_url = upload_cfg["server_url"]
+    chunk_duration = realtime_cfg.get("chunk_duration_sec", 2.0)
+    session_id = args.session_id
+    if session_id is None:
+        session = create_session(server_url, args.client_id, args.session_name, chunk_duration)
+        session_id = session["id"]
+        print(f"实时会话已创建: {session_id}")
+
+    queue = RealtimeQueue(args.queue_dir)
+    uploader = RealtimeUploadClient(server_url, queue)
+    stop_event = threading.Event()
+    sequence = 1
+
+    def upload_worker():
+        while not stop_event.is_set():
+            for item in queue.pending_items():
+                uploader.upload_item(item)
+            try:
+                uploader.send_heartbeat(session_id, args.client_id)
+            except Exception as e:
+                print(f"heartbeat 失败: {e}")
+            time.sleep(2)
+
+    print(f"实时监测启动 | session={session_id} | client={args.client_id}")
+    worker = threading.Thread(target=upload_worker, daemon=True)
+    worker.start()
+    try:
+        while True:
+            captured_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            output_path = get_output_path()
+            data = acquire_data(chunk_duration)
+            save_to_wav(data, SAMPLE_RATE, output_path, WAVE_BIT_DEPTH)
+            wav_bytes = Path(output_path).read_bytes()
+            queue.enqueue(session_id, args.client_id, sequence, captured_at, SAMPLE_RATE, chunk_duration, wav_bytes)
+            print(f"实时分片 {sequence} 已入队 | 待上传: {len(queue.pending_items())}")
+            sequence += 1
+    except KeyboardInterrupt:
+        stop_event.set()
+        worker.join(timeout=5)
+        print("实时监测已停止")
+
+
 # ============================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fish Agent 水听器采集")
@@ -189,9 +236,22 @@ if __name__ == "__main__":
     parser.add_argument("--auto-upload", action="store_true", default=AUTO_UPLOAD_DEFAULT,
                         help="采集完成后自动上传到服务器")
     parser.add_argument("--no-upload", action="store_true", help="禁用自动上传")
+    parser.add_argument("--realtime", action="store_true", default=realtime_cfg.get("enabled", False),
+                        help="启用实时分片上传模式")
+    parser.add_argument("--session-id", type=int, help="已有实时会话 ID")
+    parser.add_argument("--session-name", default=realtime_cfg.get("session_name", "pond-a"),
+                        help="实时会话名称")
+    parser.add_argument("--client-id", default=realtime_cfg.get("client_id", "pond-a-windows-01"),
+                        help="采集客户端 ID")
+    parser.add_argument("--queue-dir", default=realtime_cfg.get("queue_dir", "D:\\fish_audio\\realtime_queue"),
+                        help="实时上传队列目录")
     args = parser.parse_args()
 
     do_upload = args.auto_upload and not args.no_upload
+
+    if args.realtime:
+        run_realtime_mode(args)
+        sys.exit(0)
 
     # 获取采集时长
     if args.duration:
