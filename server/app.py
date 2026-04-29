@@ -18,9 +18,9 @@ from realtime_density import build_latest_sequence_rows, calculate_density, feed
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 RESULT_DIR = BASE_DIR / "results"
-REALTIME_DIR = BASE_DIR / "realtime_uploads"
+REALTIME_DIR = Path(os.environ.get("FISH_AGENT_REALTIME_DIR", str(BASE_DIR / "realtime_uploads")))
 STATIC_DIR = BASE_DIR / "static"
-DB_PATH = str(BASE_DIR / "data.db")
+DB_PATH = os.environ.get("FISH_AGENT_DB_PATH", str(BASE_DIR / "data.db"))
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULT_DIR.mkdir(exist_ok=True)
@@ -55,10 +55,14 @@ def _chunk_analysis_from_result(result):
     }
 
 
-def _realtime_summary_for_window(session_id, current_analysis=None):
+def _realtime_summary_for_window(session_id, current_sequence=None, current_analysis=None):
     rows = database.list_realtime_segments(session_id, limit=30)
-    if current_analysis:
-        rows.append({"status": "analyzed", **current_analysis})
+    if current_analysis and current_sequence is not None:
+        rows = [
+            {**row, **current_analysis, "status": "analyzed"}
+            if int(row["sequence"]) == int(current_sequence) else row
+            for row in rows
+        ]
     analyzed = [row for row in rows if row.get("status") == "analyzed"]
     density = calculate_density(analyzed, expected_chunks=30)
     feeding = feeding_from_density(density["density_60s"], density["completeness_60s"])
@@ -82,16 +86,50 @@ def _realtime_session_response(session):
     return response
 
 
+def _realtime_segment_response(segment):
+    response = dict(segment)
+    response["feeding"] = {
+        "level": response.get("feeding_level") or "minimal",
+        "amount_kg": response.get("feeding_amount") or 0.1,
+        "message": response.get("feeding_message") or "数据不足，建议保守处理",
+        "confidence": response.get("feeding_confidence") or "insufficient",
+    }
+    return response
+
+
 def _load_realtime_metadata(metadata):
     try:
         meta = json.loads(metadata)
     except json.JSONDecodeError:
         raise HTTPException(400, "Invalid metadata JSON")
 
-    for field in ("client_id", "sequence", "captured_at"):
+    for field in ("client_id", "session_id", "sequence", "captured_at", "sha256"):
         if field not in meta:
             raise HTTPException(400, f"{field} is required")
     return meta
+
+
+def _safe_unlink(path):
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _int_metadata(meta, field, default=None):
+    value = meta.get(field, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field} must be an integer")
+
+
+def _float_metadata(meta, field, default=None):
+    value = meta.get(field, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field} must be a number")
 
 
 # ============================================================
@@ -278,19 +316,27 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
         raise HTTPException(404, "Realtime session not found")
 
     meta = _load_realtime_metadata(metadata)
-    if meta.get("session_id") is not None and int(meta["session_id"]) != session_id:
+    if _int_metadata(meta, "session_id") != session_id:
         raise HTTPException(400, "metadata session_id does not match URL")
+    if meta["client_id"] != session["client_id"]:
+        raise HTTPException(400, "metadata client_id does not match session")
 
     content = await file.read()
     file_hash = hashlib.sha256(content).hexdigest()
-    if meta.get("sha256") and meta["sha256"] != file_hash:
+    if meta["sha256"] != file_hash:
         raise HTTPException(400, "sha256 does not match uploaded file")
 
-    sequence = int(meta["sequence"])
+    sequence = _int_metadata(meta, "sequence")
     session_dir = REALTIME_DIR / str(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     storage_name = f"{sequence:06d}_{uuid.uuid4().hex}{Path(file.filename or '').suffix or '.wav'}"
     storage_path = session_dir / storage_name
+
+    try:
+        with open(storage_path, "wb") as f:
+            f.write(content)
+    except OSError as e:
+        raise HTTPException(500, f"Failed to store realtime chunk: {e}")
 
     try:
         inserted = database.insert_realtime_segment(
@@ -298,12 +344,13 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             client_id=meta["client_id"],
             sequence=sequence,
             captured_at=meta["captured_at"],
-            duration=float(meta.get("duration", 2.0)),
-            sample_rate=int(meta.get("sample_rate", 0)),
+            duration=_float_metadata(meta, "duration", 2.0),
+            sample_rate=_int_metadata(meta, "sample_rate", 0),
             storage_name=str(Path(str(session_id)) / storage_name),
             sha256=file_hash,
         )
     except database.SequenceConflictError:
+        _safe_unlink(storage_path)
         return JSONResponse(
             content={
                 "ack": False,
@@ -312,19 +359,20 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             },
             status_code=409,
         )
+    except Exception:
+        _safe_unlink(storage_path)
+        raise
 
     if inserted["duplicate"]:
+        _safe_unlink(storage_path)
         return {
             "ack": True,
             "session_id": session_id,
             "sequence": sequence,
             "sha256": file_hash,
             "duplicate": True,
-            "segment": inserted["row"],
+            "segment": _realtime_segment_response(inserted["row"]),
         }
-
-    with open(storage_path, "wb") as f:
-        f.write(content)
 
     try:
         result = classify_file(str(storage_path))
@@ -340,7 +388,11 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             }
 
         analysis = _chunk_analysis_from_result(result)
-        density, feeding = _realtime_summary_for_window(session_id, current_analysis=analysis)
+        density, feeding = _realtime_summary_for_window(
+            session_id,
+            current_sequence=sequence,
+            current_analysis=analysis,
+        )
         database.update_realtime_segment_analysis(
             segment_id=inserted["id"],
             predicted_class=analysis["predicted_class"],
@@ -351,7 +403,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             completeness_60s=density["completeness_60s"],
             feeding=feeding,
         )
-        segment = database.get_realtime_segment(inserted["id"])
+        segment = _realtime_segment_response(database.get_realtime_segment(inserted["id"]))
         return {
             "ack": True,
             "session_id": session_id,
@@ -370,8 +422,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
                 "sha256": file_hash,
                 "duplicate": False,
                 "segment": {"status": "error", "error": str(e)},
-            },
-            status_code=500,
+            }
         )
 
 

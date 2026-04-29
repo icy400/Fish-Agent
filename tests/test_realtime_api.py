@@ -1,6 +1,7 @@
 import hashlib
 import importlib
 import json
+import os
 import sys
 import tempfile
 import types
@@ -26,21 +27,24 @@ class RealtimeApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.db_path = str(Path(self.tmp.name) / "data.db")
+        self.realtime_dir = Path(self.tmp.name) / "realtime_uploads"
+        os.environ["FISH_AGENT_DB_PATH"] = self.db_path
+        os.environ["FISH_AGENT_REALTIME_DIR"] = str(self.realtime_dir)
+        self.addCleanup(lambda: os.environ.pop("FISH_AGENT_DB_PATH", None))
+        self.addCleanup(lambda: os.environ.pop("FISH_AGENT_REALTIME_DIR", None))
         sys.path.insert(0, str(SERVER_DIR))
         self.addCleanup(lambda: sys.path.remove(str(SERVER_DIR)) if str(SERVER_DIR) in sys.path else None)
 
         import database
-        database.init_db(str(Path(self.tmp.name) / "data.db"))
+        database.init_db(self.db_path)
 
         if "app" in sys.modules:
             del sys.modules["app"]
         sys.modules["audio_infer"] = types.SimpleNamespace(classify_file=lambda path: {"segments": []})
         self.addCleanup(lambda: sys.modules.pop("audio_infer", None))
         self.app_module = importlib.import_module("app")
-        self.app_module.DB_PATH = str(Path(self.tmp.name) / "data.db")
-        self.app_module.REALTIME_DIR = Path(self.tmp.name) / "realtime_uploads"
-        self.app_module.REALTIME_DIR.mkdir(exist_ok=True)
-        self.app_module.database.init_db(self.app_module.DB_PATH)
+        self.app_module.database.init_db(self.db_path)
         self.client = TestClient(self.app_module.app)
 
     def _create_session(self):
@@ -99,6 +103,8 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(data["sha256"], metadata["sha256"])
         self.assertEqual(data["segment"]["predicted_class"], "fish")
         self.assertEqual(data["segment"]["fish_probability"], 0.9)
+        self.assertEqual(data["segment"]["feeding"]["level"], "minimal")
+        self.assertEqual(data["segment"]["feeding"]["confidence"], "insufficient")
 
     def test_duplicate_chunk_same_hash_returns_duplicate_ack(self):
         wav_path = Path(self.tmp.name) / "chunk.wav"
@@ -122,7 +128,9 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.json()["duplicate"], True)
+        self.assertIn("feeding", second.json()["segment"])
         self.assertEqual(fake_infer.call_count, 1)
+        self.assertEqual(len(list((self.realtime_dir / str(session["id"])).glob("*.wav"))), 1)
 
     def test_duplicate_chunk_different_hash_returns_conflict(self):
         wav_path = Path(self.tmp.name) / "chunk.wav"
@@ -149,6 +157,103 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["ack"], False)
         self.assertEqual(conflict.json()["error"], "sequence_conflict")
+        self.assertEqual(len(list((self.realtime_dir / str(session["id"])).glob("*.wav"))), 1)
+
+    def test_chunk_metadata_requires_session_id_and_sha256(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+        del metadata["sha256"]
+
+        res = self.client.post(
+            f"/api/realtime/sessions/{session['id']}/chunks",
+            data={"metadata": json.dumps(metadata)},
+            files={"file": ("chunk.wav", content, "audio/wav")},
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("sha256", res.json()["detail"])
+
+    def test_chunk_client_id_must_match_session(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+        metadata["client_id"] = "other-client"
+
+        res = self.client.post(
+            f"/api/realtime/sessions/{session['id']}/chunks",
+            data={"metadata": json.dumps(metadata)},
+            files={"file": ("chunk.wav", content, "audio/wav")},
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("client_id", res.json()["detail"])
+
+    def test_analysis_exception_returns_ack_with_error_segment(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+
+        with mock.patch.object(self.app_module, "classify_file", side_effect=RuntimeError("model failed")):
+            res = self.client.post(
+                f"/api/realtime/sessions/{session['id']}/chunks",
+                data={"metadata": json.dumps(metadata)},
+                files={"file": ("chunk.wav", content, "audio/wav")},
+            )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["ack"], True)
+        self.assertEqual(res.json()["segment"]["status"], "error")
+        self.assertIn("model failed", res.json()["segment"]["error"])
+
+    def test_old_backfill_does_not_change_latest_window_summary(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        background_result = {
+            "segments": [{
+                "predicted_class": "background",
+                "confidence": 0.95,
+                "probabilities": {"background": 0.95, "fish": 0.05},
+            }]
+        }
+        fish_result = {
+            "segments": [{
+                "predicted_class": "fish",
+                "confidence": 0.95,
+                "probabilities": {"background": 0.05, "fish": 0.95},
+            }]
+        }
+
+        with mock.patch.object(self.app_module, "classify_file", return_value=background_result):
+            for sequence in range(2, 32):
+                metadata = self._chunk_metadata(session["id"], content, sequence=sequence)
+                res = self.client.post(
+                    f"/api/realtime/sessions/{session['id']}/chunks",
+                    data={"metadata": json.dumps(metadata)},
+                    files={"file": ("chunk.wav", content, "audio/wav")},
+                )
+                self.assertEqual(res.status_code, 200)
+
+        with mock.patch.object(self.app_module, "classify_file", return_value=fish_result):
+            metadata = self._chunk_metadata(session["id"], content, sequence=1)
+            backfill = self.client.post(
+                f"/api/realtime/sessions/{session['id']}/chunks",
+                data={"metadata": json.dumps(metadata)},
+                files={"file": ("chunk.wav", content, "audio/wav")},
+            )
+
+        summary = self.client.get(f"/api/realtime/sessions/{session['id']}")
+        self.assertEqual(backfill.status_code, 200)
+        self.assertEqual(summary.json()["density_60s"], 0)
+        self.assertEqual(summary.json()["feeding_level"], "minimal")
 
     def test_summary_segments_and_heartbeat_endpoints(self):
         wav_path = Path(self.tmp.name) / "chunk.wav"
