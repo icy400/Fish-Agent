@@ -142,11 +142,15 @@ async function loadSegments() {
 
 function renderTimeline(rows) {
   const timeline = document.getElementById('timeline');
-  timeline.innerHTML = rows.map(row => {
+  timeline.replaceChildren();
+  for (const row of rows) {
     const cls = row.status === 'missing' ? 'bar-missing' : row.status === 'error' ? 'bar-error' : row.predicted_class === 'fish' ? 'bar-fish' : 'bar-bg';
     const title = `${row.sequence} ${row.status || ''} ${row.predicted_class || ''} ${pct(row.fish_probability)}`;
-    return `<div class="bar ${cls}" title="${escapeHtml(title)}"></div>`;
-  }).join('');
+    const bar = document.createElement('div');
+    bar.className = `bar ${cls}`;
+    bar.title = title;
+    timeline.appendChild(bar);
+  }
 }
 
 function renderTable(rows) {
