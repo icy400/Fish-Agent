@@ -132,6 +132,38 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(fake_infer.call_count, 1)
         self.assertEqual(len(list((self.realtime_dir / str(session["id"])).glob("*.wav"))), 1)
 
+    def test_duplicate_chunk_restores_missing_audio_file(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+
+        with mock.patch.object(self.app_module, "classify_file", return_value={"segments": []}):
+            first = self.client.post(
+                f"/api/realtime/sessions/{session['id']}/chunks",
+                data={"metadata": json.dumps(metadata)},
+                files={"file": ("chunk.wav", content, "audio/wav")},
+            )
+
+        self.assertEqual(first.status_code, 200)
+        import database
+        row = database.list_realtime_segments(session["id"], limit=1)[0]
+        stored_path = self.realtime_dir / row["storage_name"]
+        stored_path.unlink()
+
+        with mock.patch.object(self.app_module, "classify_file", return_value={"segments": []}) as fake_infer:
+            duplicate = self.client.post(
+                f"/api/realtime/sessions/{session['id']}/chunks",
+                data={"metadata": json.dumps(metadata)},
+                files={"file": ("chunk.wav", content, "audio/wav")},
+            )
+
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(duplicate.json()["duplicate"], True)
+        self.assertEqual(fake_infer.call_count, 0)
+        self.assertEqual(stored_path.read_bytes(), content)
+
     def test_duplicate_chunk_different_hash_returns_conflict(self):
         wav_path = Path(self.tmp.name) / "chunk.wav"
         write_silent_wav(wav_path)
@@ -175,6 +207,58 @@ class RealtimeApiTests(unittest.TestCase):
 
         self.assertEqual(res.status_code, 400)
         self.assertIn("sha256", res.json()["detail"])
+
+    def test_chunk_sequence_must_be_positive_integer(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+        metadata["sequence"] = 1.9
+
+        res = self.client.post(
+            f"/api/realtime/sessions/{session['id']}/chunks",
+            data={"metadata": json.dumps(metadata)},
+            files={"file": ("chunk.wav", content, "audio/wav")},
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("integer", res.json()["detail"])
+
+    def test_chunk_sequence_must_be_greater_than_zero(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+        metadata["sequence"] = 0
+
+        res = self.client.post(
+            f"/api/realtime/sessions/{session['id']}/chunks",
+            data={"metadata": json.dumps(metadata)},
+            files={"file": ("chunk.wav", content, "audio/wav")},
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn(">= 1", res.json()["detail"])
+
+    def test_heartbeat_counts_must_be_integers(self):
+        session = self._create_session()
+        res = self.client.post(
+            f"/api/realtime/sessions/{session['id']}/heartbeat",
+            json={
+                "client_id": "client-1",
+                "last_sequence": True,
+                "pending_chunks": 0,
+                "failed_retryable_chunks": 0,
+                "failed_conflict_chunks": 0,
+                "client_status": "ok",
+                "message": "ok",
+            },
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("integer", res.json()["detail"])
 
     def test_chunk_client_id_must_match_session(self):
         wav_path = Path(self.tmp.name) / "chunk.wav"

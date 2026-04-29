@@ -116,12 +116,24 @@ def _safe_unlink(path):
         pass
 
 
-def _int_metadata(meta, field, default=None):
-    value = meta.get(field, default)
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+def _stored_realtime_path(storage_name):
+    path = Path(storage_name)
+    if path.is_absolute():
+        return path
+    return REALTIME_DIR / path
+
+
+def _int_value(value, field, *, minimum=None):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise HTTPException(400, f"{field} must be an integer")
+    if minimum is not None and value < minimum:
+        raise HTTPException(400, f"{field} must be >= {minimum}")
+    return value
+
+
+def _int_metadata(meta, field, default=None, *, minimum=None):
+    value = meta.get(field, default)
+    return _int_value(value, field, minimum=minimum)
 
 
 def _float_metadata(meta, field, default=None):
@@ -316,7 +328,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
         raise HTTPException(404, "Realtime session not found")
 
     meta = _load_realtime_metadata(metadata)
-    if _int_metadata(meta, "session_id") != session_id:
+    if _int_metadata(meta, "session_id", minimum=1) != session_id:
         raise HTTPException(400, "metadata session_id does not match URL")
     if meta["client_id"] != session["client_id"]:
         raise HTTPException(400, "metadata client_id does not match session")
@@ -326,7 +338,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
     if meta["sha256"] != file_hash:
         raise HTTPException(400, "sha256 does not match uploaded file")
 
-    sequence = _int_metadata(meta, "sequence")
+    sequence = _int_metadata(meta, "sequence", minimum=1)
     session_dir = REALTIME_DIR / str(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     storage_name = f"{sequence:06d}_{uuid.uuid4().hex}{Path(file.filename or '').suffix or '.wav'}"
@@ -345,7 +357,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             sequence=sequence,
             captured_at=meta["captured_at"],
             duration=_float_metadata(meta, "duration", 2.0),
-            sample_rate=_int_metadata(meta, "sample_rate", 0),
+            sample_rate=_int_metadata(meta, "sample_rate", 0, minimum=0),
             storage_name=str(Path(str(session_id)) / storage_name),
             sha256=file_hash,
         )
@@ -364,7 +376,12 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
         raise
 
     if inserted["duplicate"]:
-        _safe_unlink(storage_path)
+        existing_path = _stored_realtime_path(inserted["row"]["storage_name"])
+        if not existing_path.exists():
+            existing_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_path.replace(existing_path)
+        else:
+            _safe_unlink(storage_path)
         return {
             "ack": True,
             "session_id": session_id,
@@ -448,10 +465,10 @@ async def api_realtime_heartbeat(session_id: int, payload: dict):
     ok = database.update_realtime_heartbeat(
         session_id=session_id,
         client_id=payload.get("client_id"),
-        last_sequence=int(payload.get("last_sequence", 0)),
-        pending_chunks=int(payload.get("pending_chunks", 0)),
-        failed_retryable_chunks=int(payload.get("failed_retryable_chunks", 0)),
-        failed_conflict_chunks=int(payload.get("failed_conflict_chunks", 0)),
+        last_sequence=_int_metadata(payload, "last_sequence", 0, minimum=0),
+        pending_chunks=_int_metadata(payload, "pending_chunks", 0, minimum=0),
+        failed_retryable_chunks=_int_metadata(payload, "failed_retryable_chunks", 0, minimum=0),
+        failed_conflict_chunks=_int_metadata(payload, "failed_conflict_chunks", 0, minimum=0),
         client_status=payload.get("client_status", "unknown"),
         message=payload.get("message", ""),
     )
