@@ -38,6 +38,11 @@ function statusText(s) {
   const map = { uploaded: '已上传', analyzing: '分析中', analyzed: '已分析', error: '失败' };
   return map[s] || s;
 }
+function escapeHtml(value) {
+  const div = document.createElement('div');
+  div.textContent = value == null ? '' : String(value);
+  return div.innerHTML;
+}
 
 async function loadList() {
   document.getElementById('status-bar').textContent = '加载中...';
@@ -52,22 +57,28 @@ async function loadList() {
       return;
     }
 
-    tbody.innerHTML = data.files.map(f => `
+    tbody.innerHTML = data.files.map(f => {
+      const id = Number(f.id);
+      const originalName = escapeHtml(f.original_name);
+      const feedingMessage = escapeHtml(f.feeding_message || '-');
+      const uploadTime = escapeHtml((f.upload_time || '').substring(5, 16));
+      return `
       <tr>
-        <td>${f.id}</td>
-        <td><a href="/detail.html?id=${f.id}" style="color:#0284c7;text-decoration:none;font-weight:500">${f.original_name}</a></td>
+        <td>${id}</td>
+        <td><a href="/detail.html?id=${encodeURIComponent(id)}" style="color:#0284c7;text-decoration:none;font-weight:500">${originalName}</a></td>
         <td>${f.source === 'hydrophone' ? '水听器' : '手动'}</td>
         <td>${f.duration ? f.duration.toFixed(0) + 's' : '-'}</td>
         <td style="color:#059669;font-weight:600">${f.fish_count || '-'}</td>
-        <td>${f.feeding_message || '-'}</td>
+        <td>${feedingMessage}</td>
         <td><span class="status ${statusClass(f.status)}">${statusText(f.status)}</span></td>
-        <td>${(f.upload_time || '').substring(5, 16)}</td>
+        <td>${uploadTime}</td>
         <td>
-          <a href="/detail.html?id=${f.id}" class="btn btn-primary btn-sm">查看</a>
-          <button class="btn btn-danger btn-sm" onclick="del(${f.id})">删除</button>
+          <a href="/detail.html?id=${encodeURIComponent(id)}" class="btn btn-primary btn-sm">查看</a>
+          <button class="btn btn-danger btn-sm" onclick="del(${id})">删除</button>
         </td>
       </tr>
-    `).join('');
+    `;
+    }).join('');
 
     document.getElementById('status-bar').textContent = `共 ${data.total} 条`;
   } catch (e) {

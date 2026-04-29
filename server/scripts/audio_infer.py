@@ -10,6 +10,7 @@ Usage as CLI:
 import json
 import os
 import sys
+import threading
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,8 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 import numpy as np
 import tensorflow as tf
 import librosa
-from scipy import signal as sp_signal
+
+from audio_features import LOWPASS_CUTOFF, LOWPASS_ORDER, butter_lowpass_filter
 
 # --- config -----------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -34,8 +36,6 @@ N_MFCC = 13
 N_FFT = 2048
 HOP_LENGTH = 512
 TARGET_LENGTH = 128
-LOWPASS_CUTOFF = 500
-LOWPASS_ORDER = 4
 CLASS_NAMES = ["background", "fish"]
 
 if CONFIG_PATH.exists():
@@ -54,29 +54,24 @@ if CONFIG_PATH.exists():
 _interpreter = None
 _input_details = None
 _output_details = None
+_interpreter_lock = threading.RLock()
 
 
 def _load_model():
     global _interpreter, _input_details, _output_details
-    if _interpreter is not None:
+    with _interpreter_lock:
+        if _interpreter is not None:
+            return _interpreter, _input_details, _output_details
+        _interpreter = tf.lite.Interpreter(model_path=str(MODEL_PATH))
+        _interpreter.allocate_tensors()
+        _input_details = _interpreter.get_input_details()
+        _output_details = _interpreter.get_output_details()
         return _interpreter, _input_details, _output_details
-    _interpreter = tf.lite.Interpreter(model_path=str(MODEL_PATH))
-    _interpreter.allocate_tensors()
-    _input_details = _interpreter.get_input_details()
-    _output_details = _interpreter.get_output_details()
-    return _interpreter, _input_details, _output_details
-
-
-def butter_lowpass_filter(data, cutoff=LOWPASS_CUTOFF, fs=SAMPLE_RATE, order=LOWPASS_ORDER):
-    nyq = 0.5 * fs
-    normal_cutoff = cutoff / nyq
-    sos = sp_signal.butter(order, normal_cutoff, btype="low", output="sos")
-    return sp_signal.sosfilt(sos, data)
 
 
 def _classify_chunk(audio_chunk, sr):
     interpreter, input_details, output_details = _load_model()
-    audio_chunk = butter_lowpass_filter(audio_chunk, cutoff=LOWPASS_CUTOFF, fs=sr)
+    audio_chunk = butter_lowpass_filter(audio_chunk, cutoff=LOWPASS_CUTOFF, fs=sr, order=LOWPASS_ORDER)
     mfccs = librosa.feature.mfcc(y=audio_chunk, sr=sr, n_mfcc=N_MFCC, n_fft=N_FFT, hop_length=HOP_LENGTH)
     if mfccs.shape[1] < TARGET_LENGTH:
         mfccs = np.pad(mfccs, ((0, 0), (0, TARGET_LENGTH - mfccs.shape[1])), mode="constant")
@@ -86,9 +81,10 @@ def _classify_chunk(audio_chunk, sr):
     features = mfccs.T.astype(np.float32)
     features = np.expand_dims(features, axis=0)
 
-    interpreter.set_tensor(input_details[0]["index"], features)
-    interpreter.invoke()
-    output_data = interpreter.get_tensor(output_details[0]["index"])[0]
+    with _interpreter_lock:
+        interpreter.set_tensor(input_details[0]["index"], features)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]["index"])[0]
     idx = np.argmax(output_data)
     conf = float(output_data[idx])
 

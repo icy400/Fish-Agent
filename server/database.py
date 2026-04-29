@@ -71,12 +71,12 @@ def list_files(limit=100, offset=0):
 
 
 def update_after_inference(file_id, fish_count, total_segments, duration, fish_ratio, feeding_level, feeding_amount, feeding_message):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as db:
         db.execute(
             """UPDATE files SET status='analyzed', fish_count=?, total_segments=?, duration=?,
-               fish_ratio=?, feeding_level=?, feeding_amount=?, feeding_message=?, upload_time=upload_time""",
-            (fish_count, total_segments, duration, fish_ratio, feeding_level, feeding_amount, feeding_message),
+               fish_ratio=?, feeding_level=?, feeding_amount=?, feeding_message=?
+               WHERE id=?""",
+            (fish_count, total_segments, duration, fish_ratio, feeding_level, feeding_amount, feeding_message, file_id),
         )
         db.commit()
 

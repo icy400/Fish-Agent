@@ -14,6 +14,8 @@ from pathlib import Path
 import json
 import logging
 
+from audio_features import LOWPASS_CUTOFF, LOWPASS_ORDER, butter_lowpass_filter
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,22 +31,7 @@ def extract_features(
         # Load audio file
         y, sr = librosa.load(audio_file, sr=sr)
 
-        # ================== 新增：500Hz 低通滤波 ==================
-        from scipy.signal import butter, filtfilt
-
-        def lowpass_filter(data, cutoff=500, fs=sr, order=5):
-            nyq = 0.5 * fs
-            normal_cutoff = cutoff / nyq
-            b, a = butter(order, normal_cutoff, btype='low', analog=False)
-            y_filtered = filtfilt(b, a, data)
-            return y_filtered
-
-        # 应用低通滤波
-        y_filtered = lowpass_filter(y, cutoff=500, fs=sr)
-        # =========================================================
-
-        # 使用滤波后的信号提取特征
-        y = y_filtered
+        y = butter_lowpass_filter(y, cutoff=LOWPASS_CUTOFF, fs=sr, order=LOWPASS_ORDER)
 
         # Extract MFCCs
         mfccs = librosa.feature.mfcc(
