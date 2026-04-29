@@ -340,3 +340,17 @@ def update_realtime_heartbeat(session_id, client_id, last_sequence, pending_chun
         )
         db.commit()
         return db.total_changes > 0
+
+
+def stop_realtime_session(session_id):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as db:
+        db.execute(
+            """UPDATE realtime_sessions
+               SET status='stopped', stopped_at=?, health_status='stopped',
+                   health_message='实时监测已停止'
+               WHERE id=?""",
+            (now, session_id),
+        )
+        db.commit()
+    return get_realtime_session(session_id)

@@ -496,6 +496,15 @@ async def api_realtime_heartbeat(session_id: int, payload: dict):
     }
 
 
+@app.post("/api/realtime/sessions/{session_id}/stop")
+def api_stop_realtime_session(session_id: int):
+    session_id = _validate_session_id(session_id)
+    session = database.get_realtime_session(session_id)
+    if not session:
+        raise HTTPException(404, "Realtime session not found")
+    return database.stop_realtime_session(session_id)
+
+
 # ============================================================
 # Static files (must be last)
 # ============================================================

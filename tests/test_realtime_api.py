@@ -423,6 +423,32 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(segments.status_code, 200)
         self.assertEqual(segments.json()["segments"][0]["sequence"], 1)
 
+    def test_stop_session_marks_session_stopped(self):
+        session = self._create_session()
+        res = self.client.post(f"/api/realtime/sessions/{session['id']}/stop")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "stopped")
+        self.assertEqual(res.json()["health_status"], "stopped")
+        self.assertEqual(res.json()["health_message"], "实时监测已停止")
+        self.assertIsNotNone(res.json()["stopped_at"])
+
+    def test_segments_endpoint_includes_missing_placeholder(self):
+        session = self._create_session()
+        import database
+        database.insert_realtime_segment(
+            session["id"], "client-1", 1, "2026-04-29 10:00:00", 2.0, 22050, "1.wav", "a"
+        )
+        database.insert_realtime_segment(
+            session["id"], "client-1", 3, "2026-04-29 10:00:04", 2.0, 22050, "3.wav", "c"
+        )
+
+        res = self.client.get(f"/api/realtime/sessions/{session['id']}/segments?limit=3")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([row["sequence"] for row in res.json()["segments"]], [1, 2, 3])
+        self.assertEqual(res.json()["segments"][1]["status"], "missing")
+
 
 if __name__ == "__main__":
     unittest.main()
