@@ -34,6 +34,11 @@ from audio_infer import classify_file
 
 app = FastAPI(title="Fish Agent")
 
+MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
+MAX_SEQUENCE = 10_000_000
+MAX_SAMPLE_RATE = 1_000_000
+MAX_QUEUE_COUNT = 10_000_000
+
 
 def _chunk_analysis_from_result(result):
     segments = result.get("segments") or []
@@ -123,17 +128,23 @@ def _stored_realtime_path(storage_name):
     return REALTIME_DIR / path
 
 
-def _int_value(value, field, *, minimum=None):
+def _int_value(value, field, *, minimum=None, maximum=None):
     if isinstance(value, bool) or not isinstance(value, int):
         raise HTTPException(400, f"{field} must be an integer")
     if minimum is not None and value < minimum:
         raise HTTPException(400, f"{field} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise HTTPException(400, f"{field} must be <= {maximum}")
     return value
 
 
-def _int_metadata(meta, field, default=None, *, minimum=None):
+def _int_metadata(meta, field, default=None, *, minimum=None, maximum=MAX_SQLITE_INTEGER):
     value = meta.get(field, default)
-    return _int_value(value, field, minimum=minimum)
+    return _int_value(value, field, minimum=minimum, maximum=maximum)
+
+
+def _validate_session_id(session_id):
+    return _int_value(session_id, "session_id", minimum=1, maximum=MAX_SQLITE_INTEGER)
 
 
 def _float_metadata(meta, field, default=None):
@@ -323,6 +334,7 @@ async def api_create_realtime_session(payload: dict):
 
 @app.post("/api/realtime/sessions/{session_id}/chunks")
 async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...), metadata: str = Form(...)):
+    session_id = _validate_session_id(session_id)
     session = database.get_realtime_session(session_id)
     if not session:
         raise HTTPException(404, "Realtime session not found")
@@ -338,7 +350,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
     if meta["sha256"] != file_hash:
         raise HTTPException(400, "sha256 does not match uploaded file")
 
-    sequence = _int_metadata(meta, "sequence", minimum=1)
+    sequence = _int_metadata(meta, "sequence", minimum=1, maximum=MAX_SEQUENCE)
     session_dir = REALTIME_DIR / str(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     storage_name = f"{sequence:06d}_{uuid.uuid4().hex}{Path(file.filename or '').suffix or '.wav'}"
@@ -357,7 +369,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             sequence=sequence,
             captured_at=meta["captured_at"],
             duration=_float_metadata(meta, "duration", 2.0),
-            sample_rate=_int_metadata(meta, "sample_rate", 0, minimum=0),
+            sample_rate=_int_metadata(meta, "sample_rate", 0, minimum=0, maximum=MAX_SAMPLE_RATE),
             storage_name=str(Path(str(session_id)) / storage_name),
             sha256=file_hash,
         )
@@ -445,6 +457,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
 
 @app.get("/api/realtime/sessions/{session_id}")
 def api_get_realtime_session(session_id: int):
+    session_id = _validate_session_id(session_id)
     session = database.get_realtime_session(session_id)
     if not session:
         raise HTTPException(404, "Realtime session not found")
@@ -453,6 +466,7 @@ def api_get_realtime_session(session_id: int):
 
 @app.get("/api/realtime/sessions/{session_id}/segments")
 def api_get_realtime_segments(session_id: int, limit: int = 20):
+    session_id = _validate_session_id(session_id)
     session = database.get_realtime_session(session_id)
     if not session:
         raise HTTPException(404, "Realtime session not found")
@@ -462,13 +476,14 @@ def api_get_realtime_segments(session_id: int, limit: int = 20):
 
 @app.post("/api/realtime/sessions/{session_id}/heartbeat")
 async def api_realtime_heartbeat(session_id: int, payload: dict):
+    session_id = _validate_session_id(session_id)
     ok = database.update_realtime_heartbeat(
         session_id=session_id,
         client_id=payload.get("client_id"),
-        last_sequence=_int_metadata(payload, "last_sequence", 0, minimum=0),
-        pending_chunks=_int_metadata(payload, "pending_chunks", 0, minimum=0),
-        failed_retryable_chunks=_int_metadata(payload, "failed_retryable_chunks", 0, minimum=0),
-        failed_conflict_chunks=_int_metadata(payload, "failed_conflict_chunks", 0, minimum=0),
+        last_sequence=_int_metadata(payload, "last_sequence", 0, minimum=0, maximum=MAX_SEQUENCE),
+        pending_chunks=_int_metadata(payload, "pending_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT),
+        failed_retryable_chunks=_int_metadata(payload, "failed_retryable_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT),
+        failed_conflict_chunks=_int_metadata(payload, "failed_conflict_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT),
         client_status=payload.get("client_status", "unknown"),
         message=payload.get("message", ""),
     )

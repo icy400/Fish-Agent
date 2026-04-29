@@ -260,6 +260,47 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertIn("integer", res.json()["detail"])
 
+    def test_heartbeat_counts_must_fit_bounds(self):
+        session = self._create_session()
+        res = self.client.post(
+            f"/api/realtime/sessions/{session['id']}/heartbeat",
+            json={
+                "client_id": "client-1",
+                "last_sequence": 10 ** 100,
+                "pending_chunks": 0,
+                "failed_retryable_chunks": 0,
+                "failed_conflict_chunks": 0,
+                "client_status": "ok",
+                "message": "ok",
+            },
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("<=", res.json()["detail"])
+
+    def test_sample_rate_must_fit_bounds(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+        metadata["sample_rate"] = 10 ** 100
+
+        res = self.client.post(
+            f"/api/realtime/sessions/{session['id']}/chunks",
+            data={"metadata": json.dumps(metadata)},
+            files={"file": ("chunk.wav", content, "audio/wav")},
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("<=", res.json()["detail"])
+
+    def test_path_session_id_must_fit_sqlite_bounds(self):
+        res = self.client.get(f"/api/realtime/sessions/{10 ** 100}")
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("<=", res.json()["detail"])
+
     def test_chunk_client_id_must_match_session(self):
         wav_path = Path(self.tmp.name) / "chunk.wav"
         write_silent_wav(wav_path)
