@@ -38,6 +38,16 @@ class RealtimeUploaderTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0].metadata["sequence"], 1)
 
+    def test_uploading_items_are_retried_after_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            item = queue.enqueue(1, "client-1", 1, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            queue.update_state(item, "uploading")
+            restarted = RealtimeQueue(Path(tmp))
+            pending = restarted.pending_items()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0].metadata["state"], "uploading")
+
 
 class FakeResponse:
     def __init__(self, status_code, payload):
@@ -98,6 +108,43 @@ class RealtimeUploadClientTests(unittest.TestCase):
             metadata = json.loads(item.meta_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["state"], "failed_retryable")
 
+    def test_plain_http_exception_marks_item_retryable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            item = queue.enqueue(1, "client-1", 1, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            http = FakeHttp([Exception("network down")])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+            self.assertFalse(client.upload_item(item))
+            metadata = json.loads(item.meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["state"], "failed_retryable")
+
+    def test_mismatched_ack_marks_item_retryable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            item = queue.enqueue(1, "client-1", 1, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            http = FakeHttp([
+                FakeResponse(200, {"ack": True, "session_id": 1, "sequence": 2, "sha256": item.metadata["sha256"]})
+            ])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+            self.assertFalse(client.upload_item(item))
+            metadata = json.loads(item.meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["state"], "failed_retryable")
+
+    def test_non_200_ack_marks_item_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            item = queue.enqueue(1, "client-1", 1, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            http = FakeHttp([
+                FakeResponse(202, {"ack": True, "session_id": 1, "sequence": 1, "sha256": item.metadata["sha256"]})
+            ])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+            self.assertFalse(client.upload_item(item))
+            metadata = json.loads(item.meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["state"], "failed_conflict")
+
     def test_heartbeat_sends_queue_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = RealtimeQueue(Path(tmp))
@@ -112,6 +159,35 @@ class RealtimeUploadClientTests(unittest.TestCase):
             self.assertTrue(url.endswith("/api/realtime/sessions/1/heartbeat"))
             self.assertEqual(kwargs["json"]["last_sequence"], 7)
             self.assertEqual(kwargs["json"]["failed_retryable_chunks"], 1)
+
+    def test_heartbeat_counts_only_requested_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            item = queue.enqueue(1, "client-1", 7, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            queue.update_state(item, "failed_retryable")
+            queue.enqueue(2, "client-1", 99, "2026-04-29 10:00:00", 22050, 2.0, b"other")
+            http = FakeHttp([FakeResponse(200, {"ack": True})])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+            client.send_heartbeat(1, "client-1")
+            payload = http.posts[0][1]["json"]
+            self.assertEqual(payload["last_sequence"], 7)
+            self.assertEqual(payload["pending_chunks"], 0)
+            self.assertEqual(payload["failed_retryable_chunks"], 1)
+
+    def test_heartbeat_counts_conflicts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            item = queue.enqueue(1, "client-1", 7, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            queue.update_state(item, "failed_conflict")
+            http = FakeHttp([FakeResponse(200, {"ack": True})])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+            client.send_heartbeat(1, "client-1")
+            payload = http.posts[0][1]["json"]
+            self.assertEqual(payload["failed_conflict_chunks"], 1)
+            self.assertEqual(payload["client_status"], "uploading_backlog")
+            self.assertEqual(payload["message"], "正在补传历史分片")
 
 
 if __name__ == "__main__":

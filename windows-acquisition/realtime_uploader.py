@@ -51,7 +51,7 @@ class RealtimeQueue:
         items = []
         for meta_path in sorted(self.root_dir.glob("session_*/*.json")):
             metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            if metadata.get("state") in ("pending", "failed_retryable"):
+            if metadata.get("state") in ("pending", "uploading", "failed_retryable"):
                 wav_path = meta_path.with_suffix(".wav")
                 items.append(QueueItem(wav_path=wav_path, meta_path=meta_path, metadata=metadata))
         return items
@@ -84,7 +84,7 @@ class RealtimeUploadClient:
                     files={"file": (item.wav_path.name, f, "audio/wav")},
                     timeout=(10, 120),
                 )
-        except REQUEST_EXCEPTIONS:
+        except Exception:
             self.queue.update_state(item, "failed_retryable")
             return False
 
@@ -94,7 +94,7 @@ class RealtimeUploadClient:
         if response.status_code >= 500:
             self.queue.update_state(item, "failed_retryable")
             return False
-        if response.status_code >= 400:
+        if response.status_code >= 400 or response.status_code != 200:
             self.queue.update_state(item, "failed_conflict")
             return False
 
@@ -117,7 +117,7 @@ class RealtimeUploadClient:
         return False
 
     def send_heartbeat(self, session_id, client_id):
-        all_items = self._all_items()
+        all_items = self._all_items(session_id=session_id)
         pending = [item for item in all_items if item.metadata.get("state") == "pending"]
         retryable = [item for item in all_items if item.metadata.get("state") == "failed_retryable"]
         conflicts = [item for item in all_items if item.metadata.get("state") == "failed_conflict"]
@@ -130,7 +130,7 @@ class RealtimeUploadClient:
             "failed_retryable_chunks": len(retryable),
             "failed_conflict_chunks": len(conflicts),
             "client_status": "uploading_backlog" if active_items else "normal",
-            "message": "正在补传历史分片" if pending or retryable else "实时上传正常",
+            "message": "正在补传历史分片" if active_items else "实时上传正常",
         }
         return self.http.post(
             f"{self.server_url}/api/realtime/sessions/{session_id}/heartbeat",
@@ -138,10 +138,12 @@ class RealtimeUploadClient:
             timeout=(10, 30),
         )
 
-    def _all_items(self):
+    def _all_items(self, session_id=None):
         items = []
         for meta_path in sorted(self.queue.root_dir.glob("session_*/*.json")):
             metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            if session_id is not None and metadata.get("session_id") != session_id:
+                continue
             items.append(QueueItem(
                 wav_path=meta_path.with_suffix(".wav"),
                 meta_path=meta_path,
