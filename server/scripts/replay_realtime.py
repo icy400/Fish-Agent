@@ -54,25 +54,27 @@ def main():
     session = create_session(args.server, args.client_id, args.name)
     start = datetime.now()
     for sequence, sample_rate, chunk_path in iter_wav_chunks(Path(args.file), 2.0):
-        content = chunk_path.read_bytes()
-        metadata = {
-            "client_id": args.client_id,
-            "session_id": session["id"],
-            "sequence": sequence,
-            "captured_at": (start + timedelta(seconds=(sequence - 1) * 2)).strftime("%Y-%m-%d %H:%M:%S"),
-            "duration": 2.0,
-            "sample_rate": sample_rate,
-            "sha256": hashlib.sha256(content).hexdigest(),
-        }
-        response = requests.post(
-            f"{args.server.rstrip('/')}/api/realtime/sessions/{session['id']}/chunks",
-            data={"metadata": json.dumps(metadata, ensure_ascii=False)},
-            files={"file": (chunk_path.name, content, "audio/wav")},
-            timeout=(10, 120),
-        )
-        response.raise_for_status()
-        print(f"uploaded sequence={sequence} status={response.json().get('segment', {}).get('status')}")
-        chunk_path.unlink(missing_ok=True)
+        try:
+            content = chunk_path.read_bytes()
+            metadata = {
+                "client_id": args.client_id,
+                "session_id": session["id"],
+                "sequence": sequence,
+                "captured_at": (start + timedelta(seconds=(sequence - 1) * 2)).strftime("%Y-%m-%d %H:%M:%S"),
+                "duration": 2.0,
+                "sample_rate": sample_rate,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+            response = requests.post(
+                f"{args.server.rstrip('/')}/api/realtime/sessions/{session['id']}/chunks",
+                data={"metadata": json.dumps(metadata, ensure_ascii=False)},
+                files={"file": (chunk_path.name, content, "audio/wav")},
+                timeout=(10, 120),
+            )
+            response.raise_for_status()
+            print(f"uploaded sequence={sequence} status={response.json().get('segment', {}).get('status')}")
+        finally:
+            chunk_path.unlink(missing_ok=True)
 
     print(f"Replay complete. Session id: {session['id']}")
 
