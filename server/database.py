@@ -163,6 +163,13 @@ def _row_to_dict(row):
     return dict(row) if row else None
 
 
+def _duplicate_segment_result(row, sha256):
+    row_dict = dict(row)
+    if row_dict["sha256"] != sha256:
+        raise SequenceConflictError("sequence already exists with different sha256")
+    return {"duplicate": True, "id": row_dict["id"], "row": row_dict}
+
+
 def create_realtime_session(client_id, name=None, chunk_duration=2.0):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as db:
@@ -191,22 +198,31 @@ def insert_realtime_segment(session_id, client_id, sequence, captured_at, durati
             (session_id, sequence),
         ).fetchone()
         if existing:
-            existing_dict = dict(existing)
-            if existing_dict["sha256"] != sha256:
-                raise SequenceConflictError("sequence already exists with different sha256")
-            return {"duplicate": True, "id": existing_dict["id"], "row": existing_dict}
+            return _duplicate_segment_result(existing, sha256)
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cur = db.execute(
-            """INSERT INTO realtime_segments
-               (session_id, client_id, sequence, captured_at, received_at, duration, sample_rate,
-                storage_name, sha256, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')""",
-            (session_id, client_id, sequence, captured_at, now, duration, sample_rate, storage_name, sha256),
-        )
+        try:
+            cur = db.execute(
+                """INSERT INTO realtime_segments
+                   (session_id, client_id, sequence, captured_at, received_at, duration, sample_rate,
+                    storage_name, sha256, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')""",
+                (session_id, client_id, sequence, captured_at, now, duration, sample_rate, storage_name, sha256),
+            )
+        except sqlite3.IntegrityError:
+            existing = db.execute(
+                "SELECT * FROM realtime_segments WHERE session_id=? AND sequence=?",
+                (session_id, sequence),
+            ).fetchone()
+            if existing:
+                return _duplicate_segment_result(existing, sha256)
+            raise
+
         db.execute(
-            "UPDATE realtime_sessions SET last_chunk_at=?, health_status='receiving', health_message='正在接收实时分片' WHERE id=?",
-            (captured_at, session_id),
+            """UPDATE realtime_sessions
+               SET last_chunk_at=?, health_status='receiving', health_message='正在接收实时分片'
+               WHERE id=? AND (last_chunk_at IS NULL OR last_chunk_at < ?)""",
+            (captured_at, session_id, captured_at),
         )
         db.commit()
         return {"duplicate": False, "id": cur.lastrowid, "row": get_realtime_segment(cur.lastrowid)}
