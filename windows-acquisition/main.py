@@ -197,12 +197,22 @@ def run_realtime_mode(args):
     queue = RealtimeQueue(args.queue_dir)
     uploader = RealtimeUploadClient(server_url, queue)
     stop_event = threading.Event()
-    sequence = 1
+    sequence = queue.max_sequence(session_id) + 1
 
     def upload_worker():
         while not stop_event.is_set():
-            for item in queue.pending_items():
-                uploader.upload_item(item)
+            try:
+                pending_items = queue.pending_items()
+            except Exception as e:
+                print(f"读取实时上传队列失败: {e}")
+                time.sleep(2)
+                continue
+
+            for item in pending_items:
+                try:
+                    uploader.upload_item(item)
+                except Exception as e:
+                    print(f"上传分片失败: {item.meta_path} | {e}")
             try:
                 uploader.send_heartbeat(session_id, args.client_id)
             except Exception as e:
@@ -220,6 +230,10 @@ def run_realtime_mode(args):
             save_to_wav(data, SAMPLE_RATE, output_path, WAVE_BIT_DEPTH)
             wav_bytes = Path(output_path).read_bytes()
             queue.enqueue(session_id, args.client_id, sequence, captured_at, SAMPLE_RATE, chunk_duration, wav_bytes)
+            try:
+                Path(output_path).unlink()
+            except OSError as e:
+                print(f"清理实时临时文件失败: {e}")
             print(f"实时分片 {sequence} 已入队 | 待上传: {len(queue.pending_items())}")
             sequence += 1
     except KeyboardInterrupt:

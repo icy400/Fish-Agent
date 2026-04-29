@@ -48,6 +48,14 @@ class RealtimeUploaderTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0].metadata["state"], "uploading")
 
+    def test_max_sequence_reads_existing_session_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            queue.enqueue(1, "client-1", 2, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            queue.enqueue(1, "client-1", 5, "2026-04-29 10:00:10", 22050, 2.0, b"def")
+            queue.enqueue(2, "client-1", 99, "2026-04-29 10:00:10", 22050, 2.0, b"other")
+            self.assertEqual(queue.max_sequence(1), 5)
+
 
 class FakeResponse:
     def __init__(self, status_code, payload):
@@ -57,6 +65,10 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class FakeHttp:
@@ -188,6 +200,27 @@ class RealtimeUploadClientTests(unittest.TestCase):
             self.assertEqual(payload["failed_conflict_chunks"], 1)
             self.assertEqual(payload["client_status"], "uploading_backlog")
             self.assertEqual(payload["message"], "正在补传历史分片")
+
+
+class CreateSessionTests(unittest.TestCase):
+    def test_create_session_posts_expected_payload(self):
+        http = FakeHttp([FakeResponse(200, {"id": 12, "status": "running"})])
+        from realtime_uploader import create_session
+        session = create_session("http://server:8081/", "client-1", "pond-a", 2.0, http=http)
+
+        self.assertEqual(session["id"], 12)
+        url, kwargs = http.posts[0]
+        self.assertEqual(url, "http://server:8081/api/realtime/sessions")
+        self.assertEqual(kwargs["json"]["client_id"], "client-1")
+        self.assertEqual(kwargs["json"]["name"], "pond-a")
+        self.assertEqual(kwargs["json"]["chunk_duration"], 2.0)
+
+    def test_create_session_raises_for_http_error(self):
+        http = FakeHttp([FakeResponse(500, {"error": "server down"})])
+        from realtime_uploader import create_session
+
+        with self.assertRaises(RuntimeError):
+            create_session("http://server:8081", "client-1", "pond-a", 2.0, http=http)
 
 
 if __name__ == "__main__":

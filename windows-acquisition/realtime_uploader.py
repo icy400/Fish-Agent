@@ -62,6 +62,17 @@ class RealtimeQueue:
         item.meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         item.metadata = metadata
 
+    def max_sequence(self, session_id):
+        max_sequence = 0
+        session_dir = self.root_dir / f"session_{session_id}"
+        for meta_path in sorted(session_dir.glob("*.json")):
+            try:
+                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            max_sequence = max(max_sequence, int(metadata.get("sequence", 0)))
+        return max_sequence
+
 
 class RealtimeUploadClient:
     def __init__(self, server_url, queue, http=None):
