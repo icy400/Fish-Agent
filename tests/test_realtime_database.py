@@ -131,6 +131,46 @@ class RealtimeDatabaseTests(unittest.TestCase):
         rows = database.list_realtime_segments(session_id, limit=20)
         self.assertEqual([row["sequence"] for row in rows], [1, 2, 3])
 
+    def test_update_segment_analysis_updates_session_summary(self):
+        session_id = database.create_realtime_session("client-1", "pond-a", 2.0)
+        inserted = database.insert_realtime_segment(
+            session_id, "client-1", 1, "2026-04-29 10:00:00", 2.0, 100000, "1.wav", "abc"
+        )
+        database.update_realtime_segment_analysis(
+            segment_id=inserted["id"],
+            predicted_class="fish",
+            confidence=0.91,
+            fish_probability=0.91,
+            background_probability=0.09,
+            density_60s=0.1,
+            completeness_60s=0.9,
+            feeding={"level": "medium", "amount_kg": 0.5, "message": "进食正常，建议标准投喂", "confidence": "normal"},
+        )
+        segment = database.get_realtime_segment(inserted["id"])
+        session = database.get_realtime_session(session_id)
+        self.assertEqual(segment["status"], "analyzed")
+        self.assertEqual(segment["predicted_class"], "fish")
+        self.assertEqual(session["density_60s"], 0.1)
+        self.assertEqual(session["feeding_level"], "medium")
+
+    def test_update_realtime_heartbeat_updates_client_queue_counts(self):
+        session_id = database.create_realtime_session("client-1", "pond-a", 2.0)
+        database.update_realtime_heartbeat(
+            session_id=session_id,
+            client_id="client-1",
+            last_sequence=12,
+            pending_chunks=4,
+            failed_retryable_chunks=2,
+            failed_conflict_chunks=1,
+            client_status="uploading_backlog",
+            message="正在补传历史分片",
+        )
+        session = database.get_realtime_session(session_id)
+        self.assertEqual(session["client_pending_chunks"], 4)
+        self.assertEqual(session["client_failed_retryable_chunks"], 2)
+        self.assertEqual(session["client_failed_conflict_chunks"], 1)
+        self.assertEqual(session["client_status"], "uploading_backlog")
+
 
 if __name__ == "__main__":
     unittest.main()

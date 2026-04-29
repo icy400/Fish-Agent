@@ -246,3 +246,87 @@ def list_realtime_segments(session_id, limit=20):
             (session_id, limit),
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+
+def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fish_probability,
+                                     background_probability, density_60s, completeness_60s, feeding):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT session_id FROM realtime_segments WHERE id=?", (segment_id,)).fetchone()
+        if not row:
+            return False
+
+        session_id = row["session_id"]
+        db.execute(
+            """UPDATE realtime_segments
+               SET status='analyzed', predicted_class=?, confidence=?, fish_probability=?,
+                   background_probability=?, density_60s=?, completeness_60s=?,
+                   feeding_level=?, feeding_amount=?, feeding_message=?, feeding_confidence=?, error_message=NULL
+               WHERE id=?""",
+            (
+                predicted_class,
+                confidence,
+                fish_probability,
+                background_probability,
+                density_60s,
+                completeness_60s,
+                feeding.get("level"),
+                feeding.get("amount_kg"),
+                feeding.get("message"),
+                feeding.get("confidence"),
+                segment_id,
+            ),
+        )
+        db.execute(
+            """UPDATE realtime_sessions
+               SET density_60s=?, completeness_60s=?, feeding_level=?, feeding_amount=?,
+                   feeding_message=?, feeding_confidence=?, health_status='receiving',
+                   health_message='实时监测正常'
+               WHERE id=?""",
+            (
+                density_60s,
+                completeness_60s,
+                feeding.get("level"),
+                feeding.get("amount_kg"),
+                feeding.get("message"),
+                feeding.get("confidence"),
+                session_id,
+            ),
+        )
+        db.commit()
+        return True
+
+
+def update_realtime_segment_error(segment_id, error_message):
+    with get_conn() as db:
+        db.execute(
+            "UPDATE realtime_segments SET status='error', error_message=? WHERE id=?",
+            (error_message, segment_id),
+        )
+        db.commit()
+
+
+def update_realtime_heartbeat(session_id, client_id, last_sequence, pending_chunks,
+                              failed_retryable_chunks, failed_conflict_chunks, client_status, message):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as db:
+        db.execute(
+            """UPDATE realtime_sessions
+               SET last_heartbeat_at=?, client_pending_chunks=?, client_failed_retryable_chunks=?,
+                   client_failed_conflict_chunks=?, client_status=?, health_status=?,
+                   health_message=?
+               WHERE id=? AND client_id=?""",
+            (
+                now,
+                pending_chunks,
+                failed_retryable_chunks,
+                failed_conflict_chunks,
+                client_status,
+                client_status,
+                message,
+                session_id,
+                client_id,
+            ),
+        )
+        db.commit()
+        return db.total_changes > 0
