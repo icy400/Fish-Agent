@@ -19,7 +19,9 @@ upload:
 
 realtime:
   enabled: false
+  agent_enabled: false
   client_id: "pond-a-windows-01"
   session_name: "pond-a"
   chunk_duration_sec: 2.0
+  agent_poll_interval_sec: 2.0
   queue_dir: "D:\\fish_audio\\realtime_queue"

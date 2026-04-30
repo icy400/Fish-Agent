@@ -242,6 +242,51 @@ def run_realtime_mode(args):
         print("实时监测已停止")
 
 
+def run_agent_mode(args):
+    from realtime_agent import RealtimeAgent
+    from realtime_uploader import RealtimeQueue, RealtimeUploadClient
+
+    server_url = upload_cfg["server_url"]
+    chunk_duration = realtime_cfg.get("chunk_duration_sec", 2.0)
+    queue = RealtimeQueue(args.queue_dir)
+    uploader = RealtimeUploadClient(server_url, queue)
+
+    def capture_chunk(duration):
+        output_path = get_output_path()
+        data = acquire_data(duration)
+        save_to_wav(data, SAMPLE_RATE, output_path, WAVE_BIT_DEPTH)
+        wav_bytes = Path(output_path).read_bytes()
+        try:
+            Path(output_path).unlink()
+        except OSError as e:
+            print(f"清理实时临时文件失败: {e}")
+        return wav_bytes
+
+    agent = RealtimeAgent(
+        client_id=args.client_id,
+        name=args.session_name,
+        queue=queue,
+        uploader=uploader,
+        capture_chunk=capture_chunk,
+        sample_rate=SAMPLE_RATE,
+        chunk_duration=chunk_duration,
+    )
+
+    print(f"实时采集代理启动 | client={args.client_id} | server={server_url}")
+    print("请在前端实时监测页面选择该 client_id 后开始或停止采集")
+    try:
+        while True:
+            try:
+                agent.run_once()
+            except Exception as e:
+                print(f"实时采集代理循环失败: {e}")
+                agent.status = "error"
+                agent.message = str(e)
+            time.sleep(args.agent_poll_interval)
+    except KeyboardInterrupt:
+        print("实时采集代理已停止")
+
+
 # ============================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fish Agent 水听器采集")
@@ -252,6 +297,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-upload", action="store_true", help="禁用自动上传")
     parser.add_argument("--realtime", action="store_true", default=realtime_cfg.get("enabled", False),
                         help="启用实时分片上传模式")
+    parser.add_argument("--agent", action="store_true", default=realtime_cfg.get("agent_enabled", False),
+                        help="启用前端控制的常驻实时采集代理")
     parser.add_argument("--session-id", type=int, help="已有实时会话 ID")
     parser.add_argument("--session-name", default=realtime_cfg.get("session_name", "pond-a"),
                         help="实时会话名称")
@@ -259,9 +306,16 @@ if __name__ == "__main__":
                         help="采集客户端 ID")
     parser.add_argument("--queue-dir", default=realtime_cfg.get("queue_dir", "D:\\fish_audio\\realtime_queue"),
                         help="实时上传队列目录")
+    parser.add_argument("--agent-poll-interval", type=float,
+                        default=realtime_cfg.get("agent_poll_interval_sec", 2.0),
+                        help="实时采集代理轮询服务器命令的间隔(秒)")
     args = parser.parse_args()
 
     do_upload = args.auto_upload and not args.no_upload
+
+    if args.agent:
+        run_agent_mode(args)
+        sys.exit(0)
 
     if args.realtime:
         run_realtime_mode(args)
