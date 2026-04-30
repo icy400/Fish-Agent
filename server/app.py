@@ -13,15 +13,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 import database
+from realtime_density import build_latest_sequence_rows, calculate_density, feeding_from_density
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 RESULT_DIR = BASE_DIR / "results"
+REALTIME_DIR = Path(os.environ.get("FISH_AGENT_REALTIME_DIR", str(BASE_DIR / "realtime_uploads")))
 STATIC_DIR = BASE_DIR / "static"
-DB_PATH = str(BASE_DIR / "data.db")
+DB_PATH = os.environ.get("FISH_AGENT_DB_PATH", str(BASE_DIR / "data.db"))
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULT_DIR.mkdir(exist_ok=True)
+REALTIME_DIR.mkdir(exist_ok=True)
 
 database.init_db(DB_PATH)
 
@@ -30,6 +33,126 @@ sys.path.insert(0, str(BASE_DIR / "scripts"))
 from audio_infer import classify_file
 
 app = FastAPI(title="Fish Agent")
+
+MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
+MAX_SEQUENCE = 10_000_000
+MAX_SAMPLE_RATE = 1_000_000
+MAX_QUEUE_COUNT = 10_000_000
+
+
+def _chunk_analysis_from_result(result):
+    segments = result.get("segments") or []
+    if not segments:
+        return {
+            "predicted_class": "background",
+            "confidence": 0,
+            "fish_probability": 0,
+            "background_probability": 0,
+        }
+
+    first = segments[0]
+    probabilities = first.get("probabilities", {})
+    return {
+        "predicted_class": first.get("predicted_class", "background"),
+        "confidence": first.get("confidence", 0),
+        "fish_probability": probabilities.get("fish", 0),
+        "background_probability": probabilities.get("background", 0),
+    }
+
+
+def _realtime_summary_for_window(session_id, current_sequence=None, current_analysis=None):
+    rows = database.list_realtime_segments(session_id, limit=30)
+    if current_analysis and current_sequence is not None:
+        rows = [
+            {**row, **current_analysis, "status": "analyzed"}
+            if int(row["sequence"]) == int(current_sequence) else row
+            for row in rows
+        ]
+    analyzed = [row for row in rows if row.get("status") == "analyzed"]
+    density = calculate_density(analyzed, expected_chunks=30)
+    feeding = feeding_from_density(density["density_60s"], density["completeness_60s"])
+    return density, feeding
+
+
+def _realtime_session_response(session):
+    density = calculate_density(database.list_realtime_segments(session["id"], limit=30), expected_chunks=30)
+    response = dict(session)
+    response["missing_count_60s"] = density["missing_count_60s"]
+    response["feeding"] = {
+        "level": session.get("feeding_level") or "minimal",
+        "amount_kg": session.get("feeding_amount") or 0.1,
+        "message": session.get("feeding_message") or "数据不足，建议保守处理",
+        "confidence": session.get("feeding_confidence") or "insufficient",
+    }
+    response["health"] = {
+        "connection": session.get("health_status") or "waiting",
+        "message": session.get("health_message") or "等待实时分片",
+    }
+    return response
+
+
+def _realtime_segment_response(segment):
+    response = dict(segment)
+    response["feeding"] = {
+        "level": response.get("feeding_level") or "minimal",
+        "amount_kg": response.get("feeding_amount") or 0.1,
+        "message": response.get("feeding_message") or "数据不足，建议保守处理",
+        "confidence": response.get("feeding_confidence") or "insufficient",
+    }
+    return response
+
+
+def _load_realtime_metadata(metadata):
+    try:
+        meta = json.loads(metadata)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid metadata JSON")
+
+    for field in ("client_id", "session_id", "sequence", "captured_at", "sha256"):
+        if field not in meta:
+            raise HTTPException(400, f"{field} is required")
+    return meta
+
+
+def _safe_unlink(path):
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _stored_realtime_path(storage_name):
+    path = Path(storage_name)
+    if path.is_absolute():
+        return path
+    return REALTIME_DIR / path
+
+
+def _int_value(value, field, *, minimum=None, maximum=None):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(400, f"{field} must be an integer")
+    if minimum is not None and value < minimum:
+        raise HTTPException(400, f"{field} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise HTTPException(400, f"{field} must be <= {maximum}")
+    return value
+
+
+def _int_metadata(meta, field, default=None, *, minimum=None, maximum=MAX_SQLITE_INTEGER):
+    value = meta.get(field, default)
+    return _int_value(value, field, minimum=minimum, maximum=maximum)
+
+
+def _validate_session_id(session_id):
+    return _int_value(session_id, "session_id", minimum=1, maximum=MAX_SQLITE_INTEGER)
+
+
+def _float_metadata(meta, field, default=None):
+    value = meta.get(field, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field} must be a number")
 
 
 # ============================================================
@@ -194,6 +317,192 @@ def api_delete(file_id: int):
 
     database.delete_file(file_id)
     return {"message": "deleted"}
+
+
+@app.post("/api/realtime/sessions")
+async def api_create_realtime_session(payload: dict):
+    client_id = payload.get("client_id")
+    if not client_id:
+        raise HTTPException(400, "client_id is required")
+    session_id = database.create_realtime_session(
+        client_id=client_id,
+        name=payload.get("name"),
+        chunk_duration=float(payload.get("chunk_duration", 2.0)),
+    )
+    return database.get_realtime_session(session_id)
+
+
+@app.post("/api/realtime/sessions/{session_id}/chunks")
+async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...), metadata: str = Form(...)):
+    session_id = _validate_session_id(session_id)
+    session = database.get_realtime_session(session_id)
+    if not session:
+        raise HTTPException(404, "Realtime session not found")
+
+    meta = _load_realtime_metadata(metadata)
+    if _int_metadata(meta, "session_id", minimum=1) != session_id:
+        raise HTTPException(400, "metadata session_id does not match URL")
+    if meta["client_id"] != session["client_id"]:
+        raise HTTPException(400, "metadata client_id does not match session")
+
+    content = await file.read()
+    file_hash = hashlib.sha256(content).hexdigest()
+    if meta["sha256"] != file_hash:
+        raise HTTPException(400, "sha256 does not match uploaded file")
+
+    sequence = _int_metadata(meta, "sequence", minimum=1, maximum=MAX_SEQUENCE)
+    session_dir = REALTIME_DIR / str(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    storage_name = f"{sequence:06d}_{uuid.uuid4().hex}{Path(file.filename or '').suffix or '.wav'}"
+    storage_path = session_dir / storage_name
+
+    try:
+        with open(storage_path, "wb") as f:
+            f.write(content)
+    except OSError as e:
+        raise HTTPException(500, f"Failed to store realtime chunk: {e}")
+
+    try:
+        inserted = database.insert_realtime_segment(
+            session_id=session_id,
+            client_id=meta["client_id"],
+            sequence=sequence,
+            captured_at=meta["captured_at"],
+            duration=_float_metadata(meta, "duration", 2.0),
+            sample_rate=_int_metadata(meta, "sample_rate", 0, minimum=0, maximum=MAX_SAMPLE_RATE),
+            storage_name=str(Path(str(session_id)) / storage_name),
+            sha256=file_hash,
+        )
+    except database.SequenceConflictError:
+        _safe_unlink(storage_path)
+        return JSONResponse(
+            content={
+                "ack": False,
+                "error": "sequence_conflict",
+                "message": "sequence already exists with different sha256",
+            },
+            status_code=409,
+        )
+    except Exception:
+        _safe_unlink(storage_path)
+        raise
+
+    if inserted["duplicate"]:
+        existing_path = _stored_realtime_path(inserted["row"]["storage_name"])
+        if not existing_path.exists():
+            existing_path.parent.mkdir(parents=True, exist_ok=True)
+            storage_path.replace(existing_path)
+        else:
+            _safe_unlink(storage_path)
+        return {
+            "ack": True,
+            "session_id": session_id,
+            "sequence": sequence,
+            "sha256": file_hash,
+            "duplicate": True,
+            "segment": _realtime_segment_response(inserted["row"]),
+        }
+
+    try:
+        result = classify_file(str(storage_path))
+        if "error" in result:
+            database.update_realtime_segment_error(inserted["id"], result["error"])
+            return {
+                "ack": True,
+                "session_id": session_id,
+                "sequence": sequence,
+                "sha256": file_hash,
+                "duplicate": False,
+                "segment": {"status": "error", "error": result["error"]},
+            }
+
+        analysis = _chunk_analysis_from_result(result)
+        density, feeding = _realtime_summary_for_window(
+            session_id,
+            current_sequence=sequence,
+            current_analysis=analysis,
+        )
+        database.update_realtime_segment_analysis(
+            segment_id=inserted["id"],
+            predicted_class=analysis["predicted_class"],
+            confidence=analysis["confidence"],
+            fish_probability=analysis["fish_probability"],
+            background_probability=analysis["background_probability"],
+            density_60s=density["density_60s"],
+            completeness_60s=density["completeness_60s"],
+            feeding=feeding,
+        )
+        segment = _realtime_segment_response(database.get_realtime_segment(inserted["id"]))
+        return {
+            "ack": True,
+            "session_id": session_id,
+            "sequence": sequence,
+            "sha256": file_hash,
+            "duplicate": False,
+            "segment": segment,
+        }
+    except Exception as e:
+        database.update_realtime_segment_error(inserted["id"], str(e))
+        return JSONResponse(
+            content={
+                "ack": True,
+                "session_id": session_id,
+                "sequence": sequence,
+                "sha256": file_hash,
+                "duplicate": False,
+                "segment": {"status": "error", "error": str(e)},
+            }
+        )
+
+
+@app.get("/api/realtime/sessions/{session_id}")
+def api_get_realtime_session(session_id: int):
+    session_id = _validate_session_id(session_id)
+    session = database.get_realtime_session(session_id)
+    if not session:
+        raise HTTPException(404, "Realtime session not found")
+    return _realtime_session_response(session)
+
+
+@app.get("/api/realtime/sessions/{session_id}/segments")
+def api_get_realtime_segments(session_id: int, limit: int = 20):
+    session_id = _validate_session_id(session_id)
+    session = database.get_realtime_session(session_id)
+    if not session:
+        raise HTTPException(404, "Realtime session not found")
+    rows = database.list_realtime_segments(session_id, limit=limit)
+    return {"session_id": session_id, "segments": build_latest_sequence_rows(rows, limit=limit)}
+
+
+@app.post("/api/realtime/sessions/{session_id}/heartbeat")
+async def api_realtime_heartbeat(session_id: int, payload: dict):
+    session_id = _validate_session_id(session_id)
+    ok = database.update_realtime_heartbeat(
+        session_id=session_id,
+        client_id=payload.get("client_id"),
+        last_sequence=_int_metadata(payload, "last_sequence", 0, minimum=0, maximum=MAX_SEQUENCE),
+        pending_chunks=_int_metadata(payload, "pending_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT),
+        failed_retryable_chunks=_int_metadata(payload, "failed_retryable_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT),
+        failed_conflict_chunks=_int_metadata(payload, "failed_conflict_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT),
+        client_status=payload.get("client_status", "unknown"),
+        message=payload.get("message", ""),
+    )
+    if not ok:
+        raise HTTPException(404, "Realtime session not found")
+    return {
+        "ack": True,
+        "session_id": session_id,
+        "server_status": database.get_realtime_session(session_id)["status"],
+    }
+
+
+@app.post("/api/realtime/sessions/{session_id}/stop")
+def api_stop_realtime_session(session_id: int):
+    session_id = _validate_session_id(session_id)
+    session = database.get_realtime_session(session_id)
+    if not session:
+        raise HTTPException(404, "Realtime session not found")
+    return database.stop_realtime_session(session_id)
 
 
 # ============================================================

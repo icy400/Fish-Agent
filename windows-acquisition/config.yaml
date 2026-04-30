@@ -16,3 +16,10 @@ upload:
   server_url: "http://192.168.1.100:8081"   # Linux 服务器地址
   retry_max: 3
   retry_delay_sec: 5
+
+realtime:
+  enabled: false
+  client_id: "pond-a-windows-01"
+  session_name: "pond-a"
+  chunk_duration_sec: 2.0
+  queue_dir: "D:\\fish_audio\\realtime_queue"
