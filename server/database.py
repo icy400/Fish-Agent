@@ -429,8 +429,9 @@ def _is_recent(value, online_seconds):
 def _upsert_realtime_client_on_conn(db, client_id, name=None, status="idle", current_session_id=None,
                                     agent_version=None, sample_rate=None, chunk_duration=None,
                                     last_sequence=0, pending_chunks=0, failed_retryable_chunks=0,
-                                    failed_conflict_chunks=0, message=""):
+                                    failed_conflict_chunks=0, message="", touch_heartbeat=True):
     now = _now()
+    heartbeat_at = now if touch_heartbeat else None
     db.execute(
         """INSERT INTO realtime_clients
            (client_id, name, status, current_session_id, last_heartbeat_at, last_seen_at,
@@ -442,8 +443,8 @@ def _upsert_realtime_client_on_conn(db, client_id, name=None, status="idle", cur
              name=COALESCE(excluded.name, realtime_clients.name),
              status=excluded.status,
              current_session_id=excluded.current_session_id,
-             last_heartbeat_at=excluded.last_heartbeat_at,
-             last_seen_at=excluded.last_seen_at,
+             last_heartbeat_at=COALESCE(excluded.last_heartbeat_at, realtime_clients.last_heartbeat_at),
+             last_seen_at=COALESCE(excluded.last_seen_at, realtime_clients.last_seen_at),
              agent_version=COALESCE(excluded.agent_version, realtime_clients.agent_version),
              sample_rate=COALESCE(excluded.sample_rate, realtime_clients.sample_rate),
              chunk_duration=COALESCE(excluded.chunk_duration, realtime_clients.chunk_duration),
@@ -458,8 +459,8 @@ def _upsert_realtime_client_on_conn(db, client_id, name=None, status="idle", cur
             name,
             status,
             current_session_id,
-            now,
-            now,
+            heartbeat_at,
+            heartbeat_at,
             agent_version,
             sample_rate,
             chunk_duration,
@@ -585,6 +586,7 @@ def enqueue_start_capture_command(client_id, session_name=None, chunk_duration=2
             current_session_id=session_id,
             chunk_duration=chunk_duration,
             message="等待采集端执行开始命令",
+            touch_heartbeat=False,
         )
         command_id = _insert_realtime_command(
             db,

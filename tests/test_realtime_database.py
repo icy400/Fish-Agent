@@ -358,6 +358,18 @@ class RealtimeDatabaseTests(unittest.TestCase):
         self.assertEqual(session["client_id"], "client-1")
         self.assertEqual(client["current_session_id"], first["session_id"])
 
+    def test_start_command_does_not_make_offline_client_look_online(self):
+        database.enqueue_start_capture_command(
+            client_id="offline-client",
+            session_name="pond-a",
+            chunk_duration=2.0,
+        )
+
+        client = database.get_realtime_client("offline-client", online_seconds=60)
+
+        self.assertEqual(client["online"], False)
+        self.assertEqual(client["effective_status"], "offline")
+
     def test_enqueue_stop_capture_command_is_idempotent_for_active_session(self):
         start = database.enqueue_start_capture_command("client-1", "pond-a", 2.0)
         database.update_realtime_command_status(
