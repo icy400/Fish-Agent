@@ -1,5 +1,6 @@
 """SQLite database for file metadata. Inference results stored as JSON files."""
 
+import json
 import sqlite3
 from datetime import datetime
 
@@ -83,6 +84,41 @@ def init_db(path):
                 UNIQUE(session_id, sequence)
             )
         """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS realtime_clients (
+                client_id TEXT PRIMARY KEY,
+                name TEXT,
+                status TEXT DEFAULT 'offline',
+                current_session_id INTEGER,
+                last_heartbeat_at TEXT,
+                last_seen_at TEXT,
+                agent_version TEXT,
+                sample_rate INTEGER,
+                chunk_duration REAL,
+                pending_chunks INTEGER DEFAULT 0,
+                failed_retryable_chunks INTEGER DEFAULT 0,
+                failed_conflict_chunks INTEGER DEFAULT 0,
+                last_sequence INTEGER DEFAULT 0,
+                message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS realtime_commands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT NOT NULL,
+                session_id INTEGER,
+                command_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL,
+                acked_at TEXT,
+                running_at TEXT,
+                completed_at TEXT,
+                error_message TEXT
+            )
+        """)
         realtime_session_columns = {
             row[1] for row in db.execute("PRAGMA table_info(realtime_sessions)").fetchall()
         }
@@ -93,6 +129,10 @@ def init_db(path):
         db.execute("""
             CREATE INDEX IF NOT EXISTS idx_realtime_segments_session_captured
             ON realtime_segments(session_id, captured_at)
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_realtime_commands_client_status
+            ON realtime_commands(client_id, status, created_at)
         """)
         db.commit()
 
@@ -167,6 +207,14 @@ class SequenceConflictError(Exception):
     pass
 
 
+ACTIVE_COMMAND_STATUSES = ("pending", "acked", "running")
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _now():
+    return datetime.now().strftime(DATETIME_FORMAT)
+
+
 def _row_to_dict(row):
     return dict(row) if row else None
 
@@ -179,7 +227,7 @@ def _duplicate_segment_result(row, sha256):
 
 
 def create_realtime_session(client_id, name=None, chunk_duration=2.0):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = _now()
     with get_conn() as db:
         cur = db.execute(
             """INSERT INTO realtime_sessions
@@ -208,7 +256,7 @@ def insert_realtime_segment(session_id, client_id, sequence, captured_at, durati
         if existing:
             return _duplicate_segment_result(existing, sha256)
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = _now()
         try:
             cur = db.execute(
                 """INSERT INTO realtime_segments
@@ -316,7 +364,7 @@ def update_realtime_segment_error(segment_id, error_message):
 
 def update_realtime_heartbeat(session_id, client_id, last_sequence, pending_chunks,
                               failed_retryable_chunks, failed_conflict_chunks, client_status, message):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = _now()
     with get_conn() as db:
         db.execute(
             """UPDATE realtime_sessions
@@ -343,7 +391,7 @@ def update_realtime_heartbeat(session_id, client_id, last_sequence, pending_chun
 
 
 def stop_realtime_session(session_id):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = _now()
     with get_conn() as db:
         db.execute(
             """UPDATE realtime_sessions
@@ -354,3 +402,339 @@ def stop_realtime_session(session_id):
         )
         db.commit()
     return get_realtime_session(session_id)
+
+
+def _client_row_to_dict(row, online_seconds=10):
+    data = _row_to_dict(row)
+    if not data:
+        return None
+    data["online"] = _is_recent(data.get("last_heartbeat_at"), online_seconds)
+    if not data["online"]:
+        data["effective_status"] = "offline"
+    else:
+        data["effective_status"] = data.get("status") or "idle"
+    return data
+
+
+def _is_recent(value, online_seconds):
+    if not value:
+        return False
+    try:
+        delta = datetime.now() - datetime.strptime(value, DATETIME_FORMAT)
+    except ValueError:
+        return False
+    return delta.total_seconds() <= online_seconds
+
+
+def _upsert_realtime_client_on_conn(db, client_id, name=None, status="idle", current_session_id=None,
+                                    agent_version=None, sample_rate=None, chunk_duration=None,
+                                    last_sequence=0, pending_chunks=0, failed_retryable_chunks=0,
+                                    failed_conflict_chunks=0, message=""):
+    now = _now()
+    db.execute(
+        """INSERT INTO realtime_clients
+           (client_id, name, status, current_session_id, last_heartbeat_at, last_seen_at,
+            agent_version, sample_rate, chunk_duration, pending_chunks,
+            failed_retryable_chunks, failed_conflict_chunks, last_sequence, message,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(client_id) DO UPDATE SET
+             name=COALESCE(excluded.name, realtime_clients.name),
+             status=excluded.status,
+             current_session_id=excluded.current_session_id,
+             last_heartbeat_at=excluded.last_heartbeat_at,
+             last_seen_at=excluded.last_seen_at,
+             agent_version=COALESCE(excluded.agent_version, realtime_clients.agent_version),
+             sample_rate=COALESCE(excluded.sample_rate, realtime_clients.sample_rate),
+             chunk_duration=COALESCE(excluded.chunk_duration, realtime_clients.chunk_duration),
+             pending_chunks=excluded.pending_chunks,
+             failed_retryable_chunks=excluded.failed_retryable_chunks,
+             failed_conflict_chunks=excluded.failed_conflict_chunks,
+             last_sequence=excluded.last_sequence,
+             message=excluded.message,
+             updated_at=excluded.updated_at""",
+        (
+            client_id,
+            name,
+            status,
+            current_session_id,
+            now,
+            now,
+            agent_version,
+            sample_rate,
+            chunk_duration,
+            pending_chunks,
+            failed_retryable_chunks,
+            failed_conflict_chunks,
+            last_sequence,
+            message,
+            now,
+            now,
+        ),
+    )
+
+
+def upsert_realtime_client(client_id, name=None, status="idle", current_session_id=None,
+                           agent_version=None, sample_rate=None, chunk_duration=None,
+                           last_sequence=0, pending_chunks=0, failed_retryable_chunks=0,
+                           failed_conflict_chunks=0, message=""):
+    with get_conn() as db:
+        _upsert_realtime_client_on_conn(
+            db,
+            client_id=client_id,
+            name=name,
+            status=status,
+            current_session_id=current_session_id,
+            agent_version=agent_version,
+            sample_rate=sample_rate,
+            chunk_duration=chunk_duration,
+            last_sequence=last_sequence,
+            pending_chunks=pending_chunks,
+            failed_retryable_chunks=failed_retryable_chunks,
+            failed_conflict_chunks=failed_conflict_chunks,
+            message=message,
+        )
+        db.commit()
+    return get_realtime_client(client_id)
+
+
+def get_realtime_client(client_id, online_seconds=10):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            "SELECT * FROM realtime_clients WHERE client_id=?",
+            (client_id,),
+        ).fetchone()
+        return _client_row_to_dict(row, online_seconds=online_seconds)
+
+
+def list_realtime_clients(online_seconds=10):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            "SELECT * FROM realtime_clients ORDER BY client_id"
+        ).fetchall()
+        return [_client_row_to_dict(row, online_seconds=online_seconds) for row in rows]
+
+
+def _active_session_for_client(db, client_id):
+    row = db.execute(
+        """SELECT * FROM realtime_sessions
+           WHERE client_id=? AND status='running'
+           ORDER BY id DESC LIMIT 1""",
+        (client_id,),
+    ).fetchone()
+    return row
+
+
+def _active_command_for_client(db, client_id, command_type=None):
+    sql = f"""SELECT * FROM realtime_commands
+              WHERE client_id=? AND status IN ({','.join('?' for _ in ACTIVE_COMMAND_STATUSES)})"""
+    params = [client_id, *ACTIVE_COMMAND_STATUSES]
+    if command_type:
+        sql += " AND command_type=?"
+        params.append(command_type)
+    sql += " ORDER BY id ASC LIMIT 1"
+    return db.execute(sql, params).fetchone()
+
+
+def _insert_realtime_command(db, client_id, session_id, command_type, payload):
+    now = _now()
+    cur = db.execute(
+        """INSERT INTO realtime_commands
+           (client_id, session_id, command_type, status, payload, created_at)
+           VALUES (?, ?, ?, 'pending', ?, ?)""",
+        (client_id, session_id, command_type, json.dumps(payload or {}, ensure_ascii=False), now),
+    )
+    return cur.lastrowid
+
+
+def _command_response(command_id, session_id, status, client_id):
+    return {
+        "client_id": client_id,
+        "session_id": session_id,
+        "command_id": command_id,
+        "command_status": status,
+    }
+
+
+def enqueue_start_capture_command(client_id, session_name=None, chunk_duration=2.0):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        now = _now()
+        existing_session = _active_session_for_client(db, client_id)
+        if existing_session:
+            command = _active_command_for_client(db, client_id, "start_capture")
+            status = command["status"] if command else "already_running"
+            command_id = command["id"] if command else None
+            db.commit()
+            return _command_response(command_id, existing_session["id"], status, client_id)
+
+        cur = db.execute(
+            """INSERT INTO realtime_sessions
+               (client_id, name, status, chunk_duration, created_at, started_at, health_status, health_message)
+               VALUES (?, ?, 'running', ?, ?, ?, 'waiting', '等待采集端执行开始命令')""",
+            (client_id, session_name, chunk_duration, now, now),
+        )
+        session_id = cur.lastrowid
+        _upsert_realtime_client_on_conn(
+            db,
+            client_id=client_id,
+            name=session_name,
+            status="idle",
+            current_session_id=session_id,
+            chunk_duration=chunk_duration,
+            message="等待采集端执行开始命令",
+        )
+        command_id = _insert_realtime_command(
+            db,
+            client_id=client_id,
+            session_id=session_id,
+            command_type="start_capture",
+            payload={"session_name": session_name, "chunk_duration": chunk_duration},
+        )
+        db.commit()
+        return _command_response(command_id, session_id, "pending", client_id)
+
+
+def enqueue_stop_capture_command(client_id):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        active_start = _active_command_for_client(db, client_id, "start_capture")
+        if active_start and active_start["status"] == "pending":
+            db.execute(
+                "UPDATE realtime_commands SET status='cancelled', completed_at=? WHERE id=?",
+                (_now(), active_start["id"]),
+            )
+            if active_start["session_id"]:
+                db.execute(
+                    """UPDATE realtime_sessions
+                       SET status='stopped', stopped_at=?, health_status='stopped',
+                           health_message='开始命令已取消'
+                       WHERE id=?""",
+                    (_now(), active_start["session_id"]),
+                )
+            db.execute(
+                """UPDATE realtime_clients
+                   SET status='idle', current_session_id=NULL, message='开始命令已取消', updated_at=?
+                   WHERE client_id=?""",
+                (_now(), client_id),
+            )
+            db.commit()
+            return _command_response(None, active_start["session_id"], "cancelled_start", client_id)
+
+        session = _active_session_for_client(db, client_id)
+        if not session:
+            db.commit()
+            return _command_response(None, None, "no_active_session", client_id)
+
+        command = _active_command_for_client(db, client_id, "stop_capture")
+        if command:
+            db.commit()
+            return _command_response(command["id"], command["session_id"], command["status"], client_id)
+
+        command_id = _insert_realtime_command(
+            db,
+            client_id=client_id,
+            session_id=session["id"],
+            command_type="stop_capture",
+            payload={},
+        )
+        db.execute(
+            """UPDATE realtime_clients
+               SET message='等待采集端执行停止命令', updated_at=?
+               WHERE client_id=?""",
+            (_now(), client_id),
+        )
+        db.commit()
+        return _command_response(command_id, session["id"], "pending", client_id)
+
+
+def get_next_realtime_command(client_id):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        row = _active_command_for_client(db, client_id)
+        if not row:
+            return None
+        command = dict(row)
+        try:
+            command["payload"] = json.loads(command.get("payload") or "{}")
+        except json.JSONDecodeError:
+            command["payload"] = {}
+        return command
+
+
+def get_realtime_command(command_id):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT * FROM realtime_commands WHERE id=?", (command_id,)).fetchone()
+        if not row:
+            return None
+        command = dict(row)
+        try:
+            command["payload"] = json.loads(command.get("payload") or "{}")
+        except json.JSONDecodeError:
+            command["payload"] = {}
+        return command
+
+
+def update_realtime_command_status(command_id, client_id, status, error_message=None):
+    if status not in ("acked", "running", "completed", "failed", "cancelled"):
+        raise ValueError(f"unsupported command status: {status}")
+
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        command = db.execute(
+            "SELECT * FROM realtime_commands WHERE id=? AND client_id=?",
+            (command_id, client_id),
+        ).fetchone()
+        if not command:
+            return None
+
+        now = _now()
+        timestamp_field = {
+            "acked": "acked_at",
+            "running": "running_at",
+            "completed": "completed_at",
+            "failed": "completed_at",
+            "cancelled": "completed_at",
+        }[status]
+        db.execute(
+            f"""UPDATE realtime_commands
+                SET status=?, {timestamp_field}=COALESCE({timestamp_field}, ?), error_message=?
+                WHERE id=? AND client_id=?""",
+            (status, now, error_message, command_id, client_id),
+        )
+
+        if command["command_type"] == "start_capture" and status in ("running", "completed"):
+            db.execute(
+                """UPDATE realtime_clients
+                   SET status='capturing', current_session_id=?, message='正在采集实时分片', updated_at=?
+                   WHERE client_id=?""",
+                (command["session_id"], now, client_id),
+            )
+        elif command["command_type"] == "stop_capture" and status == "completed":
+            db.execute(
+                """UPDATE realtime_sessions
+                   SET status='stopped', stopped_at=?, health_status='stopped',
+                       health_message='实时监测已停止'
+                   WHERE id=?""",
+                (now, command["session_id"]),
+            )
+            db.execute(
+                """UPDATE realtime_clients
+                   SET status='idle', current_session_id=NULL, message='采集已停止', updated_at=?
+                   WHERE client_id=?""",
+                (now, client_id),
+            )
+        elif status == "failed":
+            db.execute(
+                """UPDATE realtime_clients
+                   SET status='error', message=?, updated_at=?
+                   WHERE client_id=?""",
+                (error_message or "命令执行失败", now, client_id),
+            )
+
+        db.commit()
+
+    return get_realtime_command(command_id)

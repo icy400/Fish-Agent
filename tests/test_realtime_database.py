@@ -279,6 +279,171 @@ class RealtimeDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(result, False)
 
+    def test_upsert_realtime_client_creates_and_updates_client(self):
+        database.upsert_realtime_client(
+            client_id="client-1",
+            name="pond-a",
+            status="idle",
+            current_session_id=None,
+            agent_version="agent-test",
+            sample_rate=22050,
+            chunk_duration=2.0,
+            last_sequence=0,
+            pending_chunks=0,
+            failed_retryable_chunks=0,
+            failed_conflict_chunks=0,
+            message="ready",
+        )
+        database.upsert_realtime_client(
+            client_id="client-1",
+            name="pond-a",
+            status="capturing",
+            current_session_id=7,
+            agent_version="agent-test",
+            sample_rate=22050,
+            chunk_duration=2.0,
+            last_sequence=3,
+            pending_chunks=2,
+            failed_retryable_chunks=1,
+            failed_conflict_chunks=0,
+            message="capturing",
+        )
+
+        client = database.get_realtime_client("client-1")
+        self.assertEqual(client["client_id"], "client-1")
+        self.assertEqual(client["status"], "capturing")
+        self.assertEqual(client["current_session_id"], 7)
+        self.assertEqual(client["pending_chunks"], 2)
+        self.assertEqual(client["failed_retryable_chunks"], 1)
+        self.assertEqual(client["message"], "capturing")
+
+    def test_list_realtime_clients_includes_online_state(self):
+        database.upsert_realtime_client(
+            client_id="client-1",
+            name="pond-a",
+            status="idle",
+            current_session_id=None,
+            agent_version="agent-test",
+            sample_rate=22050,
+            chunk_duration=2.0,
+            last_sequence=0,
+            pending_chunks=0,
+            failed_retryable_chunks=0,
+            failed_conflict_chunks=0,
+            message="ready",
+        )
+
+        clients = database.list_realtime_clients(online_seconds=60)
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0]["client_id"], "client-1")
+        self.assertEqual(clients[0]["online"], True)
+
+    def test_enqueue_start_capture_command_creates_session_and_is_idempotent(self):
+        first = database.enqueue_start_capture_command(
+            client_id="client-1",
+            session_name="pond-a",
+            chunk_duration=2.0,
+        )
+        second = database.enqueue_start_capture_command(
+            client_id="client-1",
+            session_name="pond-a",
+            chunk_duration=2.0,
+        )
+
+        self.assertEqual(first["session_id"], second["session_id"])
+        self.assertEqual(first["command_id"], second["command_id"])
+        self.assertEqual(first["command_status"], "pending")
+        session = database.get_realtime_session(first["session_id"])
+        client = database.get_realtime_client("client-1")
+        self.assertEqual(session["client_id"], "client-1")
+        self.assertEqual(client["current_session_id"], first["session_id"])
+
+    def test_enqueue_stop_capture_command_is_idempotent_for_active_session(self):
+        start = database.enqueue_start_capture_command("client-1", "pond-a", 2.0)
+        database.update_realtime_command_status(
+            command_id=start["command_id"],
+            client_id="client-1",
+            status="completed",
+        )
+
+        first = database.enqueue_stop_capture_command("client-1")
+        second = database.enqueue_stop_capture_command("client-1")
+
+        self.assertEqual(first["session_id"], start["session_id"])
+        self.assertEqual(first["command_id"], second["command_id"])
+        self.assertEqual(first["command_status"], "pending")
+
+    def test_enqueue_stop_without_active_session_returns_noop(self):
+        database.upsert_realtime_client(
+            client_id="client-1",
+            name="pond-a",
+            status="idle",
+            current_session_id=None,
+            agent_version="agent-test",
+            sample_rate=22050,
+            chunk_duration=2.0,
+            last_sequence=0,
+            pending_chunks=0,
+            failed_retryable_chunks=0,
+            failed_conflict_chunks=0,
+            message="ready",
+        )
+
+        result = database.enqueue_stop_capture_command("client-1")
+
+        self.assertIsNone(result["session_id"])
+        self.assertIsNone(result["command_id"])
+        self.assertEqual(result["command_status"], "no_active_session")
+
+    def test_agent_command_polling_and_status_transitions(self):
+        start = database.enqueue_start_capture_command("client-1", "pond-a", 2.0)
+
+        command = database.get_next_realtime_command("client-1")
+        self.assertEqual(command["id"], start["command_id"])
+        self.assertEqual(command["command_type"], "start_capture")
+        self.assertEqual(command["status"], "pending")
+
+        acked = database.update_realtime_command_status(
+            command_id=start["command_id"],
+            client_id="client-1",
+            status="acked",
+        )
+        running = database.update_realtime_command_status(
+            command_id=start["command_id"],
+            client_id="client-1",
+            status="running",
+        )
+        completed = database.update_realtime_command_status(
+            command_id=start["command_id"],
+            client_id="client-1",
+            status="completed",
+        )
+
+        self.assertEqual(acked["status"], "acked")
+        self.assertEqual(running["status"], "running")
+        self.assertEqual(completed["status"], "completed")
+        client = database.get_realtime_client("client-1")
+        self.assertEqual(client["status"], "capturing")
+        self.assertEqual(client["current_session_id"], start["session_id"])
+
+    def test_completing_stop_command_stops_session_and_clears_client(self):
+        start = database.enqueue_start_capture_command("client-1", "pond-a", 2.0)
+        database.update_realtime_command_status(start["command_id"], "client-1", "completed")
+        stop = database.enqueue_stop_capture_command("client-1")
+
+        completed = database.update_realtime_command_status(
+            command_id=stop["command_id"],
+            client_id="client-1",
+            status="completed",
+        )
+
+        session = database.get_realtime_session(start["session_id"])
+        client = database.get_realtime_client("client-1")
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(session["status"], "stopped")
+        self.assertEqual(client["status"], "idle")
+        self.assertIsNone(client["current_session_id"])
+
 
 if __name__ == "__main__":
     unittest.main()
