@@ -490,6 +490,28 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(command.json()["command"]["id"], start.json()["command_id"])
         self.assertEqual(command.json()["command"]["command_type"], "start_capture")
         self.assertEqual(command.json()["command"]["session_id"], start.json()["session_id"])
+        self.assertIn("queue_key", command.json()["command"]["payload"])
+        self.assertEqual(command.json()["command"]["payload"]["next_sequence"], 1)
+
+    def test_command_session_rejects_chunk_from_wrong_queue_namespace(self):
+        start = self.client.post(
+            "/api/realtime/clients/client-1/commands/start",
+            json={"session_name": "pond-a", "chunk_duration": 2.0},
+        ).json()
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        metadata = self._chunk_metadata(start["session_id"], content, sequence=8)
+
+        with mock.patch.object(self.app_module, "classify_file", return_value={"segments": []}):
+            res = self.client.post(
+                f"/api/realtime/sessions/{start['session_id']}/chunks",
+                data={"metadata": json.dumps(metadata)},
+                files={"file": ("chunk.wav", content, "audio/wav")},
+            )
+
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.json()["error"], "queue_key_conflict")
 
     def test_start_command_is_idempotent_for_repeated_clicks(self):
         first = self.client.post(

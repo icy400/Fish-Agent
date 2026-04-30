@@ -74,6 +74,45 @@ class RealtimeAgentTests(unittest.TestCase):
                 ["ack", "running", "complete"],
             )
 
+    def test_start_command_uses_queue_namespace_for_fresh_session_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            stale_item = queue.enqueue(
+                12,
+                "client-1",
+                8,
+                "2026-04-30 09:59:00",
+                22050,
+                2.0,
+                b"old-session-bytes",
+            )
+            queue.update_state(stale_item, "uploaded")
+            uploader = FakeUploader(queue, commands=[{
+                "id": 7,
+                "session_id": 12,
+                "command_type": "start_capture",
+                "payload": {"chunk_duration": 2.0, "queue_key": "fresh-run"},
+            }])
+
+            def capture_chunk(duration):
+                return b"new-session-bytes"
+
+            from realtime_agent import RealtimeAgent
+            agent = RealtimeAgent(
+                client_id="client-1",
+                name="pond-a",
+                queue=queue,
+                uploader=uploader,
+                capture_chunk=capture_chunk,
+                sample_rate=22050,
+                chunk_duration=2.0,
+                now_func=lambda: "2026-04-30 10:00:00",
+            )
+
+            agent.run_once()
+
+            self.assertEqual(uploader.uploaded_sequences, [1])
+
     def test_stop_command_stops_capture_and_still_uploads_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = RealtimeQueue(Path(tmp))

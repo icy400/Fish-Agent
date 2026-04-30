@@ -27,8 +27,15 @@ class RealtimeQueue:
         self.root_dir = Path(root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
-    def enqueue(self, session_id, client_id, sequence, captured_at, sample_rate, duration, wav_bytes):
-        session_dir = self.root_dir / f"session_{session_id}"
+    def _session_dir(self, session_id, queue_key=None):
+        if not queue_key:
+            return self.root_dir / f"session_{session_id}"
+        safe_key = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(queue_key))
+        return self.root_dir / f"session_{session_id}_{safe_key}"
+
+    def enqueue(self, session_id, client_id, sequence, captured_at, sample_rate, duration, wav_bytes,
+                queue_key=None):
+        session_dir = self._session_dir(session_id, queue_key=queue_key)
         session_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{sequence:06d}"
         wav_path = session_dir / f"{stem}.wav"
@@ -44,6 +51,8 @@ class RealtimeQueue:
             "sha256": hashlib.sha256(wav_bytes).hexdigest(),
             "state": "pending",
         }
+        if queue_key:
+            metadata["queue_key"] = str(queue_key)
         meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         return QueueItem(wav_path=wav_path, meta_path=meta_path, metadata=metadata)
 
@@ -62,13 +71,15 @@ class RealtimeQueue:
         item.meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         item.metadata = metadata
 
-    def max_sequence(self, session_id):
+    def max_sequence(self, session_id, queue_key=None):
         max_sequence = 0
-        session_dir = self.root_dir / f"session_{session_id}"
+        session_dir = self._session_dir(session_id, queue_key=queue_key)
         for meta_path in sorted(session_dir.glob("*.json")):
             try:
                 metadata = json.loads(meta_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
+                continue
+            if queue_key is not None and metadata.get("queue_key") != str(queue_key):
                 continue
             max_sequence = max(max_sequence, int(metadata.get("sequence", 0)))
         return max_sequence
@@ -150,8 +161,9 @@ class RealtimeUploadClient:
         )
 
     def send_agent_heartbeat(self, client_id, name=None, status="idle", current_session_id=None,
-                             sample_rate=0, chunk_duration=2.0, message="", agent_version="fish-agent-1"):
-        all_items = self._all_items(session_id=current_session_id)
+                             sample_rate=0, chunk_duration=2.0, message="", agent_version="fish-agent-1",
+                             queue_key=None):
+        all_items = self._all_items(session_id=current_session_id, queue_key=queue_key)
         pending = [item for item in all_items if item.metadata.get("state") == "pending"]
         retryable = [item for item in all_items if item.metadata.get("state") == "failed_retryable"]
         conflicts = [item for item in all_items if item.metadata.get("state") == "failed_conflict"]
@@ -196,11 +208,13 @@ class RealtimeUploadClient:
             timeout=(10, 30),
         )
 
-    def _all_items(self, session_id=None):
+    def _all_items(self, session_id=None, queue_key=None):
         items = []
         for meta_path in sorted(self.queue.root_dir.glob("session_*/*.json")):
             metadata = json.loads(meta_path.read_text(encoding="utf-8"))
             if session_id is not None and metadata.get("session_id") != session_id:
+                continue
+            if queue_key is not None and metadata.get("queue_key") != str(queue_key):
                 continue
             items.append(QueueItem(
                 wav_path=meta_path.with_suffix(".wav"),

@@ -56,6 +56,23 @@ class RealtimeUploaderTests(unittest.TestCase):
             queue.enqueue(2, "client-1", 99, "2026-04-29 10:00:10", 22050, 2.0, b"other")
             self.assertEqual(queue.max_sequence(1), 5)
 
+    def test_max_sequence_can_be_scoped_to_queue_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            queue.enqueue(1, "client-1", 8, "2026-04-29 10:00:00", 22050, 2.0, b"old")
+            queue.enqueue(
+                1,
+                "client-1",
+                2,
+                "2026-04-29 10:00:02",
+                22050,
+                2.0,
+                b"fresh",
+                queue_key="fresh-run",
+            )
+
+            self.assertEqual(queue.max_sequence(1, queue_key="fresh-run"), 2)
+
 
 class FakeResponse:
     def __init__(self, status_code, payload):
@@ -234,6 +251,38 @@ class RealtimeUploadClientTests(unittest.TestCase):
             self.assertEqual(kwargs["json"]["current_session_id"], 12)
             self.assertEqual(kwargs["json"]["last_sequence"], 3)
             self.assertEqual(kwargs["json"]["failed_retryable_chunks"], 1)
+
+    def test_agent_heartbeat_counts_only_queue_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            stale = queue.enqueue(12, "client-1", 8, "2026-04-29 10:00:00", 22050, 2.0, b"old")
+            queue.update_state(stale, "failed_retryable")
+            fresh = queue.enqueue(
+                12,
+                "client-1",
+                1,
+                "2026-04-29 10:00:02",
+                22050,
+                2.0,
+                b"fresh",
+                queue_key="fresh-run",
+            )
+            queue.update_state(fresh, "pending")
+            http = FakeHttp([FakeResponse(200, {"ack": True})])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+
+            client.send_agent_heartbeat(
+                client_id="client-1",
+                status="capturing",
+                current_session_id=12,
+                queue_key="fresh-run",
+            )
+
+            payload = http.posts[0][1]["json"]
+            self.assertEqual(payload["last_sequence"], 1)
+            self.assertEqual(payload["pending_chunks"], 1)
+            self.assertEqual(payload["failed_retryable_chunks"], 0)
 
     def test_poll_agent_command_returns_command_payload(self):
         with tempfile.TemporaryDirectory() as tmp:

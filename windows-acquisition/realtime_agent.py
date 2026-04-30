@@ -20,6 +20,7 @@ class RealtimeAgent:
         self.now_func = now_func or (lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.status = "idle"
         self.current_session_id = None
+        self.current_queue_key = None
         self.next_sequence = 1
         self.message = "等待前端采集命令"
 
@@ -44,6 +45,7 @@ class RealtimeAgent:
             sample_rate=self.sample_rate,
             chunk_duration=self.chunk_duration,
             message=self.message,
+            queue_key=self.current_queue_key,
         )
 
     def handle_command(self, command):
@@ -61,7 +63,10 @@ class RealtimeAgent:
         self.uploader.update_agent_command_status(self.client_id, command_id, "running")
         self.current_session_id = session_id
         self.chunk_duration = float(payload.get("chunk_duration", self.chunk_duration))
-        self.next_sequence = self.queue.max_sequence(session_id) + 1
+        self.current_queue_key = payload.get("queue_key")
+        queued_next = self.queue.max_sequence(session_id, queue_key=self.current_queue_key) + 1
+        payload_next = int(payload.get("next_sequence", queued_next))
+        self.next_sequence = max(payload_next, queued_next)
         self.status = "capturing"
         self.message = "正在采集实时分片"
         self.uploader.update_agent_command_status(self.client_id, command_id, "complete")
@@ -72,6 +77,7 @@ class RealtimeAgent:
         self.uploader.update_agent_command_status(self.client_id, command_id, "running")
         self.status = "idle"
         self.current_session_id = None
+        self.current_queue_key = None
         self.message = "采集已停止，继续补传队列"
         self.uploader.update_agent_command_status(self.client_id, command_id, "complete")
 
@@ -86,6 +92,7 @@ class RealtimeAgent:
             sample_rate=self.sample_rate,
             duration=self.chunk_duration,
             wav_bytes=wav_bytes,
+            queue_key=self.current_queue_key,
         )
         self.next_sequence += 1
 

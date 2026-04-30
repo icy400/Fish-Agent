@@ -491,6 +491,15 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
         raise HTTPException(400, "metadata session_id does not match URL")
     if meta["client_id"] != session["client_id"]:
         raise HTTPException(400, "metadata client_id does not match session")
+    if session.get("queue_key") and meta.get("queue_key") != session["queue_key"]:
+        return JSONResponse(
+            content={
+                "ack": False,
+                "error": "queue_key_conflict",
+                "message": "chunk queue_key does not match session",
+            },
+            status_code=409,
+        )
 
     content = await file.read()
     file_hash = hashlib.sha256(content).hexdigest()

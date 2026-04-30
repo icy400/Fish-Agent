@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime
 
 DB_PATH = None  # set by app.py on startup
@@ -34,6 +35,7 @@ def init_db(path):
             CREATE TABLE IF NOT EXISTS realtime_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 client_id TEXT NOT NULL,
+                queue_key TEXT,
                 name TEXT,
                 status TEXT NOT NULL,
                 chunk_duration REAL DEFAULT 2.0,
@@ -125,6 +127,10 @@ def init_db(path):
         if "client_last_sequence" not in realtime_session_columns:
             db.execute(
                 "ALTER TABLE realtime_sessions ADD COLUMN client_last_sequence INTEGER DEFAULT 0"
+            )
+        if "queue_key" not in realtime_session_columns:
+            db.execute(
+                "ALTER TABLE realtime_sessions ADD COLUMN queue_key TEXT"
             )
         db.execute("""
             CREATE INDEX IF NOT EXISTS idx_realtime_segments_session_captured
@@ -230,14 +236,15 @@ def _duplicate_segment_result(row, sha256):
     return {"duplicate": True, "id": row_dict["id"], "row": row_dict}
 
 
-def create_realtime_session(client_id, name=None, chunk_duration=2.0):
+def create_realtime_session(client_id, name=None, chunk_duration=2.0, queue_key=None):
     now = _now()
     with get_conn() as db:
         cur = db.execute(
             """INSERT INTO realtime_sessions
-               (client_id, name, status, chunk_duration, created_at, started_at, health_status, health_message)
-               VALUES (?, ?, 'running', ?, ?, ?, 'waiting', '等待实时分片')""",
-            (client_id, name, chunk_duration, now, now),
+               (client_id, queue_key, name, status, chunk_duration, created_at, started_at,
+                health_status, health_message)
+               VALUES (?, ?, ?, 'running', ?, ?, ?, 'waiting', '等待实时分片')""",
+            (client_id, queue_key, name, chunk_duration, now, now),
         )
         db.commit()
         return cur.lastrowid
@@ -588,11 +595,13 @@ def enqueue_start_capture_command(client_id, session_name=None, chunk_duration=2
             db.commit()
             return _command_response(command_id, existing_session["id"], status, client_id)
 
+        queue_key = uuid.uuid4().hex
         cur = db.execute(
             """INSERT INTO realtime_sessions
-               (client_id, name, status, chunk_duration, created_at, started_at, health_status, health_message)
-               VALUES (?, ?, 'running', ?, ?, ?, 'waiting', '等待采集端执行开始命令')""",
-            (client_id, session_name, chunk_duration, now, now),
+               (client_id, queue_key, name, status, chunk_duration, created_at, started_at,
+                health_status, health_message)
+               VALUES (?, ?, ?, 'running', ?, ?, ?, 'waiting', '等待采集端执行开始命令')""",
+            (client_id, queue_key, session_name, chunk_duration, now, now),
         )
         session_id = cur.lastrowid
         _upsert_realtime_client_on_conn(
@@ -610,7 +619,12 @@ def enqueue_start_capture_command(client_id, session_name=None, chunk_duration=2
             client_id=client_id,
             session_id=session_id,
             command_type="start_capture",
-            payload={"session_name": session_name, "chunk_duration": chunk_duration},
+            payload={
+                "session_name": session_name,
+                "chunk_duration": chunk_duration,
+                "queue_key": queue_key,
+                "next_sequence": 1,
+            },
         )
         db.commit()
         return _command_response(command_id, session_id, "pending", client_id)
