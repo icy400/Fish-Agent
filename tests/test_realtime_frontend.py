@@ -13,7 +13,7 @@ class RealtimeFrontendTests(unittest.TestCase):
         self.assertIn("/commands/start", html)
         self.assertIn("/commands/stop", html)
         self.assertIn("/api/realtime/sessions", html)
-        self.assertIn("/segments?limit=20", html)
+        self.assertIn("/segments?limit=30", html)
         self.assertIn("/sessions?limit=20", html)
         self.assertIn("clients-body", html)
         self.assertIn("sessions-body", html)
@@ -23,6 +23,7 @@ class RealtimeFrontendTests(unittest.TestCase):
     def test_realtime_page_renders_multi_client_controls(self):
         html = (STATIC / "realtime.html").read_text(encoding="utf-8")
         self.assertIn("采集端列表", html)
+        self.assertIn("最近 30 个分片", html)
         self.assertIn("selected-client", html)
         self.assertIn("startClient", html)
         self.assertIn("stopClient", html)

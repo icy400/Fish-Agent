@@ -73,7 +73,7 @@
   </div>
 
   <div class="card">
-    <h2>最近 20 个分片</h2>
+    <h2>最近 30 个分片</h2>
     <div class="timeline realtime-timeline" id="timeline"></div>
   </div>
 
@@ -355,7 +355,7 @@ async function loadSummary() {
 
 async function loadSegments() {
   try {
-    const res = await fetch(`/api/realtime/sessions/${sessionId}/segments?limit=20`);
+    const res = await fetch(`/api/realtime/sessions/${sessionId}/segments?limit=30`);
     if (!res.ok) return;
     const data = await res.json();
     renderTimeline(data.segments || []);
