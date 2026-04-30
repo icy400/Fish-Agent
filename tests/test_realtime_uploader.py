@@ -75,9 +75,17 @@ class FakeHttp:
     def __init__(self, responses):
         self.responses = list(responses)
         self.posts = []
+        self.gets = []
 
     def post(self, url, **kwargs):
         self.posts.append((url, kwargs))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def get(self, url, **kwargs):
+        self.gets.append((url, kwargs))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -200,6 +208,56 @@ class RealtimeUploadClientTests(unittest.TestCase):
             self.assertEqual(payload["failed_conflict_chunks"], 1)
             self.assertEqual(payload["client_status"], "uploading_backlog")
             self.assertEqual(payload["message"], "正在补传历史分片")
+
+    def test_agent_heartbeat_posts_client_status_and_queue_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            item = queue.enqueue(12, "client-1", 3, "2026-04-29 10:00:00", 22050, 2.0, b"abc")
+            queue.update_state(item, "failed_retryable")
+            http = FakeHttp([FakeResponse(200, {"ack": True})])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+
+            response = client.send_agent_heartbeat(
+                client_id="client-1",
+                name="pond-a",
+                status="capturing",
+                current_session_id=12,
+                sample_rate=22050,
+                chunk_duration=2.0,
+                message="capturing",
+            )
+
+            self.assertEqual(response.status_code, 200)
+            url, kwargs = http.posts[0]
+            self.assertEqual(url, "http://server:8081/api/realtime/agents/client-1/heartbeat")
+            self.assertEqual(kwargs["json"]["current_session_id"], 12)
+            self.assertEqual(kwargs["json"]["last_sequence"], 3)
+            self.assertEqual(kwargs["json"]["failed_retryable_chunks"], 1)
+
+    def test_poll_agent_command_returns_command_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            http = FakeHttp([FakeResponse(200, {"command": {"id": 5, "command_type": "start_capture"}})])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+
+            command = client.poll_agent_command("client-1")
+
+            self.assertEqual(command["id"], 5)
+            self.assertEqual(http.gets[0][0], "http://server:8081/api/realtime/agents/client-1/command")
+
+    def test_update_agent_command_status_posts_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = RealtimeQueue(Path(tmp))
+            http = FakeHttp([FakeResponse(200, {"ack": True, "command": {"status": "completed"}})])
+            from realtime_uploader import RealtimeUploadClient
+            client = RealtimeUploadClient("http://server:8081", queue, http=http)
+
+            response = client.update_agent_command_status("client-1", 5, "complete")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(http.posts[0][0], "http://server:8081/api/realtime/agents/client-1/commands/5/complete")
 
 
 class CreateSessionTests(unittest.TestCase):

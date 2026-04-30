@@ -149,6 +149,53 @@ class RealtimeUploadClient:
             timeout=(10, 30),
         )
 
+    def send_agent_heartbeat(self, client_id, name=None, status="idle", current_session_id=None,
+                             sample_rate=0, chunk_duration=2.0, message="", agent_version="fish-agent-1"):
+        all_items = self._all_items(session_id=current_session_id)
+        pending = [item for item in all_items if item.metadata.get("state") == "pending"]
+        retryable = [item for item in all_items if item.metadata.get("state") == "failed_retryable"]
+        conflicts = [item for item in all_items if item.metadata.get("state") == "failed_conflict"]
+        payload = {
+            "name": name,
+            "status": status,
+            "current_session_id": current_session_id,
+            "agent_version": agent_version,
+            "sample_rate": sample_rate,
+            "chunk_duration": chunk_duration,
+            "last_sequence": max([item.metadata.get("sequence", 0) for item in all_items], default=0),
+            "pending_chunks": len(pending),
+            "failed_retryable_chunks": len(retryable),
+            "failed_conflict_chunks": len(conflicts),
+            "message": message,
+        }
+        return self.http.post(
+            f"{self.server_url}/api/realtime/agents/{client_id}/heartbeat",
+            json=payload,
+            timeout=(10, 30),
+        )
+
+    def poll_agent_command(self, client_id):
+        response = self.http.get(
+            f"{self.server_url}/api/realtime/agents/{client_id}/command",
+            timeout=(10, 30),
+        )
+        if response.status_code != 200:
+            return None
+        try:
+            return response.json().get("command")
+        except ValueError:
+            return None
+
+    def update_agent_command_status(self, client_id, command_id, action, error_message=None):
+        payload = {}
+        if error_message:
+            payload["error_message"] = error_message
+        return self.http.post(
+            f"{self.server_url}/api/realtime/agents/{client_id}/commands/{command_id}/{action}",
+            json=payload,
+            timeout=(10, 30),
+        )
+
     def _all_items(self, session_id=None):
         items = []
         for meta_path in sorted(self.queue.root_dir.glob("session_*/*.json")):
