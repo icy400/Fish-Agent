@@ -456,6 +456,44 @@ class RealtimeDatabaseTests(unittest.TestCase):
         self.assertEqual(client["status"], "idle")
         self.assertIsNone(client["current_session_id"])
 
+    def test_list_realtime_sessions_for_client_returns_newest_first(self):
+        first = database.create_realtime_session("client-1", "pond-a-1", 2.0)
+        second = database.create_realtime_session("client-1", "pond-a-2", 2.0)
+        database.create_realtime_session("client-2", "pond-b", 2.0)
+
+        rows = database.list_realtime_sessions_for_client("client-1", limit=10)
+
+        self.assertEqual([row["id"] for row in rows], [second, first])
+        self.assertEqual([row["name"] for row in rows], ["pond-a-2", "pond-a-1"])
+
+    def test_delete_stopped_realtime_session_removes_session_segments_and_commands(self):
+        start = database.enqueue_start_capture_command("client-1", "pond-a", 2.0)
+        database.update_realtime_command_status(start["command_id"], "client-1", "completed")
+        inserted = database.insert_realtime_segment(
+            start["session_id"], "client-1", 1, "2026-04-30 10:00:00", 2.0, 22050, "1/1.wav", "abc"
+        )
+        stop = database.enqueue_stop_capture_command("client-1")
+        database.update_realtime_command_status(stop["command_id"], "client-1", "completed")
+
+        deleted = database.delete_stopped_realtime_session(start["session_id"])
+
+        self.assertEqual(deleted["id"], start["session_id"])
+        self.assertIsNone(database.get_realtime_session(start["session_id"]))
+        self.assertEqual(database.list_realtime_segments(start["session_id"], limit=20), [])
+        self.assertIsNone(database.get_realtime_segment(inserted["id"]))
+        self.assertEqual(database.get_next_realtime_command("client-1"), None)
+
+    def test_delete_running_realtime_session_is_rejected(self):
+        session_id = database.create_realtime_session("client-1", "pond-a", 2.0)
+
+        with self.assertRaises(database.RealtimeSessionNotStoppedError):
+            database.delete_stopped_realtime_session(session_id)
+
+        self.assertIsNotNone(database.get_realtime_session(session_id))
+
+    def test_delete_missing_realtime_session_returns_none(self):
+        self.assertIsNone(database.delete_stopped_realtime_session(999))
+
 
 if __name__ == "__main__":
     unittest.main()

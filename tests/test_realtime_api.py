@@ -551,6 +551,58 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(client.json()["client"]["status"], "error")
         self.assertEqual(client.json()["client"]["message"], "DAQ offline")
 
+    def test_client_sessions_endpoint_lists_history(self):
+        first = self._create_session()
+        self.client.post(f"/api/realtime/sessions/{first['id']}/stop")
+        second = self.client.post(
+            "/api/realtime/sessions",
+            json={"client_id": "client-1", "name": "pond-a-2"},
+        ).json()
+
+        res = self.client.get("/api/realtime/clients/client-1/sessions?limit=10")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([row["id"] for row in res.json()["sessions"]], [second["id"], first["id"]])
+        self.assertEqual(res.json()["sessions"][0]["client_id"], "client-1")
+
+    def test_delete_running_session_returns_conflict(self):
+        session = self._create_session()
+
+        res = self.client.delete(f"/api/realtime/sessions/{session['id']}")
+
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("stopped", res.json()["detail"])
+        self.assertEqual(self.client.get(f"/api/realtime/sessions/{session['id']}").status_code, 200)
+
+    def test_delete_stopped_session_removes_database_rows_and_audio_directory(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        metadata = self._chunk_metadata(session["id"], content)
+
+        with mock.patch.object(self.app_module, "classify_file", return_value={"segments": []}):
+            upload = self.client.post(
+                f"/api/realtime/sessions/{session['id']}/chunks",
+                data={"metadata": json.dumps(metadata)},
+                files={"file": ("chunk.wav", content, "audio/wav")},
+            )
+        self.assertEqual(upload.status_code, 200)
+        session_dir = self.realtime_dir / str(session["id"])
+        self.assertTrue(session_dir.exists())
+        self.client.post(f"/api/realtime/sessions/{session['id']}/stop")
+
+        deleted = self.client.delete(f"/api/realtime/sessions/{session['id']}")
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["deleted"], True)
+        self.assertFalse(session_dir.exists())
+        self.assertEqual(self.client.get(f"/api/realtime/sessions/{session['id']}").status_code, 404)
+        self.assertEqual(
+            self.client.get(f"/api/realtime/sessions/{session['id']}/segments").status_code,
+            404,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

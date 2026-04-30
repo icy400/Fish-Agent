@@ -43,6 +43,27 @@
     </div>
   </div>
 
+  <div class="card">
+    <h2>会话历史</h2>
+    <div class="seg-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>会话</th>
+            <th>名称</th>
+            <th>状态</th>
+            <th>开始时间</th>
+            <th>停止时间</th>
+            <th>密度</th>
+            <th>投喂建议</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="sessions-body"><tr><td colspan="8" class="empty">请选择采集端</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="stats">
     <div class="stat-card"><div class="label">会话状态</div><div class="value" id="session-status">未开始</div></div>
     <div class="stat-card"><div class="label">连接状态</div><div class="value" id="health-status">等待</div></div>
@@ -73,6 +94,7 @@
 let selectedClientId = localStorage.getItem('realtimeClientId') || '';
 let sessionId = Number(localStorage.getItem('realtimeSessionId') || 0);
 let clients = [];
+let sessions = [];
 let timer = null;
 
 function escapeHtml(value) {
@@ -151,7 +173,91 @@ function viewClient(clientId, currentSessionId) {
     localStorage.removeItem('realtimeSessionId');
   }
   setSelectedClient(selectedClientLabel());
+  loadSessions();
   pollSession();
+}
+
+async function loadSessions() {
+  if (!selectedClientId) {
+    renderSessions([]);
+    return;
+  }
+  try {
+    const res = await fetch(`/api/realtime/clients/${encodeURIComponent(selectedClientId)}/sessions?limit=20`);
+    if (!res.ok) return;
+    const data = await res.json();
+    sessions = data.sessions || [];
+    renderSessions(sessions);
+  } catch (e) {
+    document.getElementById('sessions-body').innerHTML = '<tr><td colspan="8" class="empty">会话历史加载失败</td></tr>';
+  }
+}
+
+function renderSessions(rows) {
+  const body = document.getElementById('sessions-body');
+  if (!selectedClientId) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">请选择采集端</td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">暂无会话历史</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map((session, index) => `
+    <tr class="${Number(session.id) === Number(sessionId) ? 'selected-row' : ''}">
+      <td>#${Number(session.id) || '-'}</td>
+      <td>${escapeHtml(session.name || '-')}</td>
+      <td>${escapeHtml(session.status || '-')}</td>
+      <td>${escapeHtml(session.started_at || session.created_at || '-')}</td>
+      <td>${escapeHtml(session.stopped_at || '-')}</td>
+      <td>${pct(session.density_60s)}</td>
+      <td>${escapeHtml(session.feeding_message || '-')}</td>
+      <td class="actions">
+        <button class="btn btn-sm" onclick="viewSessionByIndex(${index})">查看</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteSessionByIndex(${index})" ${session.status === 'stopped' ? '' : 'disabled'}>删除</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function viewSessionByIndex(index) {
+  const session = sessions[index];
+  if (!session) return;
+  viewSession(session.id);
+}
+
+function viewSession(id) {
+  sessionId = Number(id || 0);
+  if (sessionId) {
+    localStorage.setItem('realtimeSessionId', String(sessionId));
+  } else {
+    localStorage.removeItem('realtimeSessionId');
+  }
+  setSelectedClient(selectedClientLabel());
+  renderSessions(sessions);
+  pollSession();
+}
+
+async function deleteSessionByIndex(index) {
+  const session = sessions[index];
+  if (!session) return;
+  await deleteSession(session.id);
+}
+
+async function deleteSession(id) {
+  if (!confirm(`确认删除会话 #${id} 及其采集音频？`)) return;
+  const res = await fetch(`/api/realtime/sessions/${id}`, {method: 'DELETE'});
+  if (!res.ok) {
+    document.getElementById('health-status').textContent = res.status === 409 ? '请先停止会话再删除' : '删除会话失败';
+    return;
+  }
+  if (Number(sessionId) === Number(id)) {
+    sessionId = 0;
+    localStorage.removeItem('realtimeSessionId');
+    resetSessionPanel();
+  }
+  await loadSessions();
+  await loadClients();
 }
 
 async function startClientByIndex(index) {
@@ -197,6 +303,7 @@ async function stopClient(clientId = selectedClientId) {
 
 async function pollNow() {
   await loadClients();
+  await loadSessions();
   await pollSession();
 }
 

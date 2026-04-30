@@ -371,6 +371,16 @@ def api_get_realtime_client(client_id: str):
     return _client_with_session_response(client)
 
 
+@app.get("/api/realtime/clients/{client_id}/sessions")
+def api_list_realtime_client_sessions(client_id: str, limit: int = 20):
+    client_id = _validate_client_id(client_id)
+    limit = _int_value(limit, "limit", minimum=1, maximum=100)
+    return {
+        "client_id": client_id,
+        "sessions": database.list_realtime_sessions_for_client(client_id, limit=limit),
+    }
+
+
 @app.post("/api/realtime/clients/{client_id}/commands/start")
 async def api_start_realtime_client(client_id: str, payload: dict):
     client_id = _validate_client_id(client_id)
@@ -599,6 +609,36 @@ def api_get_realtime_session(session_id: int):
     if not session:
         raise HTTPException(404, "Realtime session not found")
     return _realtime_session_response(session)
+
+
+@app.delete("/api/realtime/sessions/{session_id}")
+def api_delete_realtime_session(session_id: int):
+    session_id = _validate_session_id(session_id)
+    session = database.get_realtime_session(session_id)
+    if not session:
+        raise HTTPException(404, "Realtime session not found")
+    if session["status"] != "stopped":
+        raise HTTPException(409, "Realtime session must be stopped before deletion")
+
+    session_dir = REALTIME_DIR / str(session_id)
+    audio_deleted = False
+    if session_dir.exists():
+        if session_dir.is_dir():
+            shutil.rmtree(session_dir)
+        else:
+            session_dir.unlink()
+        audio_deleted = True
+
+    try:
+        deleted = database.delete_stopped_realtime_session(session_id)
+    except database.RealtimeSessionNotStoppedError as e:
+        raise HTTPException(409, str(e))
+
+    return {
+        "deleted": bool(deleted),
+        "session_id": session_id,
+        "audio_deleted": audio_deleted,
+    }
 
 
 @app.get("/api/realtime/sessions/{session_id}/segments")

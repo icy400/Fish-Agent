@@ -14,7 +14,9 @@ class RealtimeFrontendTests(unittest.TestCase):
         self.assertIn("/commands/stop", html)
         self.assertIn("/api/realtime/sessions", html)
         self.assertIn("/segments?limit=20", html)
+        self.assertIn("/sessions?limit=20", html)
         self.assertIn("clients-body", html)
+        self.assertIn("sessions-body", html)
         self.assertIn("latest-body", html)
         self.assertIn("timeline", html)
 
@@ -25,6 +27,9 @@ class RealtimeFrontendTests(unittest.TestCase):
         self.assertIn("startClient", html)
         self.assertIn("stopClient", html)
         self.assertIn("viewClient", html)
+        self.assertIn("会话历史", html)
+        self.assertIn("deleteSession", html)
+        self.assertIn("confirm(", html)
 
     def test_existing_pages_link_to_realtime(self):
         for page in ["index.html", "upload.html", "detail.html"]:
@@ -45,6 +50,7 @@ class RealtimeFrontendTests(unittest.TestCase):
         html = (STATIC / "realtime.html").read_text(encoding="utf-8")
         self.assertIn("escapeHtml(client.client_id", html)
         self.assertIn("escapeHtml(client.message", html)
+        self.assertIn("escapeHtml(session.name", html)
         self.assertIn("escapeHtml(row.feeding_message", html)
 
 

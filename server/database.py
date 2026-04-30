@@ -207,6 +207,10 @@ class SequenceConflictError(Exception):
     pass
 
 
+class RealtimeSessionNotStoppedError(Exception):
+    pass
+
+
 ACTIVE_COMMAND_STATUSES = ("pending", "acked", "running")
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -302,6 +306,19 @@ def list_realtime_segments(session_id, limit=20):
             (session_id, limit),
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+
+def list_realtime_sessions_for_client(client_id, limit=20):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """SELECT * FROM realtime_sessions
+               WHERE client_id=?
+               ORDER BY id DESC
+               LIMIT ?""",
+            (client_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fish_probability,
@@ -740,3 +757,29 @@ def update_realtime_command_status(command_id, client_id, status, error_message=
         db.commit()
 
     return get_realtime_command(command_id)
+
+
+def delete_stopped_realtime_session(session_id):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        session = db.execute(
+            "SELECT * FROM realtime_sessions WHERE id=?",
+            (session_id,),
+        ).fetchone()
+        if not session:
+            return None
+        if session["status"] != "stopped":
+            raise RealtimeSessionNotStoppedError("Realtime session must be stopped before deletion")
+
+        session_dict = dict(session)
+        db.execute("DELETE FROM realtime_segments WHERE session_id=?", (session_id,))
+        db.execute("DELETE FROM realtime_commands WHERE session_id=?", (session_id,))
+        db.execute(
+            """UPDATE realtime_clients
+               SET current_session_id=NULL, updated_at=?
+               WHERE current_session_id=?""",
+            (_now(), session_id),
+        )
+        db.execute("DELETE FROM realtime_sessions WHERE id=?", (session_id,))
+        db.commit()
+        return session_dict
