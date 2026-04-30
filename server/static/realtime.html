@@ -17,11 +17,30 @@
   <div class="header"><h1>实时鱼声监测</h1></div>
 
   <div class="card realtime-controls">
-    <input id="client-id" value="pond-a-windows-01" placeholder="client_id">
     <input id="session-name" value="pond-a" placeholder="监测名称">
-    <button class="btn btn-primary" id="start-btn">开始监测</button>
-    <button class="btn btn-danger" id="stop-btn">停止监测</button>
-    <span id="session-chip" class="session-chip">未连接</span>
+    <button class="btn btn-primary" id="refresh-btn">刷新采集端</button>
+    <span id="selected-client" class="session-chip">未选择采集端</span>
+  </div>
+
+  <div class="card">
+    <h2>采集端列表</h2>
+    <div class="seg-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>client_id</th>
+            <th>状态</th>
+            <th>在线</th>
+            <th>会话</th>
+            <th>待上传</th>
+            <th>最近心跳</th>
+            <th>消息</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="clients-body"><tr><td colspan="8" class="empty">暂无采集端，请先启动 Windows Agent</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="stats">
@@ -51,7 +70,9 @@
 </div>
 
 <script>
+let selectedClientId = localStorage.getItem('realtimeClientId') || '';
 let sessionId = Number(localStorage.getItem('realtimeSessionId') || 0);
+let clients = [];
 let timer = null;
 
 function escapeHtml(value) {
@@ -64,38 +85,126 @@ function pct(value) {
   return `${Math.round((Number(value) || 0) * 100)}%`;
 }
 
-function setSessionChip(text) {
-  document.getElementById('session-chip').textContent = text;
+function setSelectedClient(text) {
+  document.getElementById('selected-client').textContent = text;
 }
 
-async function startSession() {
-  const res = await fetch('/api/realtime/sessions', {
+function selectedClientLabel() {
+  if (!selectedClientId) return '未选择采集端';
+  return sessionId ? `${selectedClientId} | 会话 #${sessionId}` : selectedClientId;
+}
+
+async function loadClients() {
+  try {
+    const res = await fetch('/api/realtime/clients');
+    if (!res.ok) return;
+    const data = await res.json();
+    clients = data.clients || [];
+    renderClients(clients);
+    if (!selectedClientId && clients.length) {
+      viewClient(clients[0].client_id, clients[0].current_session_id);
+    } else {
+      setSelectedClient(selectedClientLabel());
+    }
+  } catch (e) {
+    document.getElementById('clients-body').innerHTML = '<tr><td colspan="8" class="empty">采集端加载失败</td></tr>';
+  }
+}
+
+function renderClients(rows) {
+  const body = document.getElementById('clients-body');
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">暂无采集端，请先启动 Windows Agent</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map((client, index) => `
+    <tr class="${client.client_id === selectedClientId ? 'selected-row' : ''}">
+      <td>${escapeHtml(client.client_id || '-')}</td>
+      <td>${escapeHtml(client.effective_status || client.status || '-')}</td>
+      <td>${client.online ? '在线' : '离线'}</td>
+      <td>${client.current_session_id || '-'}</td>
+      <td>${Number(client.pending_chunks || 0) + Number(client.failed_retryable_chunks || 0)}</td>
+      <td>${escapeHtml(client.last_heartbeat_at || '-')}</td>
+      <td>${escapeHtml(client.message || '-')}</td>
+      <td class="actions">
+        <button class="btn btn-sm btn-primary" onclick="startClientByIndex(${index})">开始</button>
+        <button class="btn btn-sm btn-danger" onclick="stopClientByIndex(${index})">停止</button>
+        <button class="btn btn-sm" onclick="viewClientByIndex(${index})">查看</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function viewClientByIndex(index) {
+  const client = clients[index];
+  if (!client) return;
+  viewClient(client.client_id, client.current_session_id);
+}
+
+function viewClient(clientId, currentSessionId) {
+  selectedClientId = clientId || '';
+  sessionId = Number(currentSessionId || 0);
+  localStorage.setItem('realtimeClientId', selectedClientId);
+  if (sessionId) {
+    localStorage.setItem('realtimeSessionId', String(sessionId));
+  } else {
+    localStorage.removeItem('realtimeSessionId');
+  }
+  setSelectedClient(selectedClientLabel());
+  pollSession();
+}
+
+async function startClientByIndex(index) {
+  const client = clients[index];
+  if (!client) return;
+  await startClient(client.client_id);
+}
+
+async function startClient(clientId = selectedClientId) {
+  if (!clientId) return;
+  const res = await fetch(`/api/realtime/clients/${encodeURIComponent(clientId)}/commands/start`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      client_id: document.getElementById('client-id').value,
-      name: document.getElementById('session-name').value,
+      session_name: document.getElementById('session-name').value,
       chunk_duration: 2.0
     })
   });
   if (!res.ok) return;
   const data = await res.json();
-  sessionId = data.id;
-  localStorage.setItem('realtimeSessionId', String(sessionId));
-  setSessionChip(`会话 #${sessionId}`);
+  viewClient(clientId, data.session_id);
+  document.getElementById('health-status').textContent = data.command_status === 'already_running' ? '采集中' : '等待采集端执行开始命令';
   await pollNow();
-  startPolling();
 }
 
-async function stopSession() {
-  if (!sessionId) return;
-  await fetch(`/api/realtime/sessions/${sessionId}/stop`, {method: 'POST'});
+async function stopClientByIndex(index) {
+  const client = clients[index];
+  if (!client) return;
+  await stopClient(client.client_id);
+}
+
+async function stopClient(clientId = selectedClientId) {
+  if (!clientId) return;
+  const res = await fetch(`/api/realtime/clients/${encodeURIComponent(clientId)}/commands/stop`, {method: 'POST'});
+  if (!res.ok) return;
+  const data = await res.json();
+  if (data.session_id) {
+    viewClient(clientId, data.session_id);
+  }
+  document.getElementById('health-status').textContent = data.command_status === 'no_active_session' ? '没有运行中的会话' : '等待采集端执行停止命令';
   await pollNow();
-  stopPolling();
 }
 
 async function pollNow() {
-  if (!sessionId) return;
+  await loadClients();
+  await pollSession();
+}
+
+async function pollSession() {
+  if (!sessionId) {
+    resetSessionPanel();
+    return;
+  }
   await Promise.all([loadSummary(), loadSegments()]);
 }
 
@@ -107,6 +216,16 @@ function startPolling() {
 function stopPolling() {
   if (timer) clearInterval(timer);
   timer = null;
+}
+
+function resetSessionPanel() {
+  document.getElementById('session-status').textContent = '未开始';
+  document.getElementById('health-status').textContent = selectedClientId ? '等待采集命令' : '等待';
+  document.getElementById('density').textContent = '0%';
+  document.getElementById('completeness').textContent = '0%';
+  document.getElementById('feeding').textContent = '-';
+  document.getElementById('timeline').replaceChildren();
+  document.getElementById('latest-body').innerHTML = '<tr><td colspan="8" class="empty">暂无实时分片</td></tr>';
 }
 
 async function loadSummary() {
@@ -121,8 +240,7 @@ async function loadSummary() {
     document.getElementById('density').textContent = pct(s.density_60s);
     document.getElementById('completeness').textContent = pct(s.completeness_60s);
     document.getElementById('feeding').textContent = `${feeding.level || s.feeding_level || '-'} ${feeding.amount_kg || s.feeding_amount || 0}kg`;
-    setSessionChip(`会话 #${sessionId}`);
-    if (s.status === 'stopped') stopPolling();
+    setSelectedClient(selectedClientLabel());
   } catch (e) {
     document.getElementById('health-status').textContent = '连接异常';
   }
@@ -173,14 +291,11 @@ function renderTable(rows) {
   `).join('');
 }
 
-document.getElementById('start-btn').addEventListener('click', startSession);
-document.getElementById('stop-btn').addEventListener('click', stopSession);
+document.getElementById('refresh-btn').addEventListener('click', pollNow);
 
-if (sessionId) {
-  setSessionChip(`会话 #${sessionId}`);
-  pollNow();
-  startPolling();
-}
+setSelectedClient(selectedClientLabel());
+pollNow();
+startPolling();
 </script>
 </body>
 </html>

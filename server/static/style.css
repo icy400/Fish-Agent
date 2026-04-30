@@ -58,6 +58,11 @@ tr:hover { background: #f0f9ff; }
 .session-chip { display: inline-flex; align-items: center; min-height: 34px; padding: 0 12px; border-radius: 8px; background: #eef2ff; color: #3730a3; font-size: 13px; font-weight: 600; }
 .realtime-timeline { min-height: 30px; align-items: center; }
 .realtime-timeline .bar { width: 28px; min-width: 28px; }
+.selected-row { background: #eef6ff; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions .btn { border: 1px solid #dbeafe; background: #fff; color: #0369a1; }
+.actions .btn-primary { background: #1677ff; color: #fff; border-color: #1677ff; }
+.actions .btn-danger { background: #ff4d4f; color: #fff; border-color: #ff4d4f; }
 
 /* segment table scroll */
 .seg-scroll { max-height: 400px; overflow-y: auto; }
