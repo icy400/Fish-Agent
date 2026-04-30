@@ -449,6 +449,108 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual([row["sequence"] for row in res.json()["segments"]], [1, 2, 3])
         self.assertEqual(res.json()["segments"][1]["status"], "missing")
 
+    def test_agent_heartbeat_registers_client_and_clients_endpoint_lists_it(self):
+        heartbeat = self.client.post(
+            "/api/realtime/agents/client-1/heartbeat",
+            json={
+                "name": "pond-a",
+                "status": "idle",
+                "current_session_id": None,
+                "agent_version": "test-agent",
+                "sample_rate": 22050,
+                "chunk_duration": 2.0,
+                "last_sequence": 0,
+                "pending_chunks": 0,
+                "failed_retryable_chunks": 0,
+                "failed_conflict_chunks": 0,
+                "message": "ready",
+            },
+        )
+        clients = self.client.get("/api/realtime/clients")
+
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(heartbeat.json()["ack"], True)
+        self.assertEqual(clients.status_code, 200)
+        self.assertEqual(clients.json()["clients"][0]["client_id"], "client-1")
+        self.assertEqual(clients.json()["clients"][0]["status"], "idle")
+        self.assertEqual(clients.json()["clients"][0]["online"], True)
+
+    def test_start_command_endpoint_creates_session_and_agent_can_poll_it(self):
+        start = self.client.post(
+            "/api/realtime/clients/client-1/commands/start",
+            json={"session_name": "pond-a", "chunk_duration": 2.0},
+        )
+        command = self.client.get("/api/realtime/agents/client-1/command")
+
+        self.assertEqual(start.status_code, 200)
+        self.assertIsNotNone(start.json()["session_id"])
+        self.assertIsNotNone(start.json()["command_id"])
+        self.assertEqual(start.json()["command_status"], "pending")
+        self.assertEqual(command.status_code, 200)
+        self.assertEqual(command.json()["command"]["id"], start.json()["command_id"])
+        self.assertEqual(command.json()["command"]["command_type"], "start_capture")
+        self.assertEqual(command.json()["command"]["session_id"], start.json()["session_id"])
+
+    def test_start_command_is_idempotent_for_repeated_clicks(self):
+        first = self.client.post(
+            "/api/realtime/clients/client-1/commands/start",
+            json={"session_name": "pond-a", "chunk_duration": 2.0},
+        )
+        second = self.client.post(
+            "/api/realtime/clients/client-1/commands/start",
+            json={"session_name": "pond-a", "chunk_duration": 2.0},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["session_id"], second.json()["session_id"])
+        self.assertEqual(first.json()["command_id"], second.json()["command_id"])
+
+    def test_agent_command_status_complete_start_then_stop(self):
+        start = self.client.post(
+            "/api/realtime/clients/client-1/commands/start",
+            json={"session_name": "pond-a", "chunk_duration": 2.0},
+        ).json()
+
+        ack = self.client.post(f"/api/realtime/agents/client-1/commands/{start['command_id']}/ack")
+        running = self.client.post(f"/api/realtime/agents/client-1/commands/{start['command_id']}/running")
+        complete = self.client.post(f"/api/realtime/agents/client-1/commands/{start['command_id']}/complete")
+        stop = self.client.post("/api/realtime/clients/client-1/commands/stop")
+        stop_complete = self.client.post(
+            f"/api/realtime/agents/client-1/commands/{stop.json()['command_id']}/complete"
+        )
+        session = self.client.get(f"/api/realtime/sessions/{start['session_id']}")
+        client = self.client.get("/api/realtime/clients/client-1")
+
+        self.assertEqual(ack.status_code, 200)
+        self.assertEqual(running.status_code, 200)
+        self.assertEqual(complete.status_code, 200)
+        self.assertEqual(complete.json()["command"]["status"], "completed")
+        self.assertEqual(stop.status_code, 200)
+        self.assertEqual(stop.json()["session_id"], start["session_id"])
+        self.assertEqual(stop_complete.status_code, 200)
+        self.assertEqual(session.json()["status"], "stopped")
+        self.assertEqual(client.json()["client"]["status"], "idle")
+        self.assertIsNone(client.json()["client"]["current_session_id"])
+
+    def test_agent_command_fail_marks_command_failed(self):
+        start = self.client.post(
+            "/api/realtime/clients/client-1/commands/start",
+            json={"session_name": "pond-a", "chunk_duration": 2.0},
+        ).json()
+
+        failed = self.client.post(
+            f"/api/realtime/agents/client-1/commands/{start['command_id']}/fail",
+            json={"error_message": "DAQ offline"},
+        )
+        client = self.client.get("/api/realtime/clients/client-1")
+
+        self.assertEqual(failed.status_code, 200)
+        self.assertEqual(failed.json()["command"]["status"], "failed")
+        self.assertEqual(failed.json()["command"]["error_message"], "DAQ offline")
+        self.assertEqual(client.json()["client"]["status"], "error")
+        self.assertEqual(client.json()["client"]["message"], "DAQ offline")
+
 
 if __name__ == "__main__":
     unittest.main()

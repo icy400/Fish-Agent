@@ -38,6 +38,7 @@ MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 MAX_SEQUENCE = 10_000_000
 MAX_SAMPLE_RATE = 1_000_000
 MAX_QUEUE_COUNT = 10_000_000
+CLIENT_ONLINE_SECONDS = 10
 
 
 def _chunk_analysis_from_result(result):
@@ -147,12 +148,49 @@ def _validate_session_id(session_id):
     return _int_value(session_id, "session_id", minimum=1, maximum=MAX_SQLITE_INTEGER)
 
 
+def _validate_client_id(client_id):
+    if not isinstance(client_id, str) or not client_id.strip():
+        raise HTTPException(400, "client_id is required")
+    if len(client_id) > 128:
+        raise HTTPException(400, "client_id must be <= 128 characters")
+    return client_id.strip()
+
+
 def _float_metadata(meta, field, default=None):
     value = meta.get(field, default)
     try:
         return float(value)
     except (TypeError, ValueError):
         raise HTTPException(400, f"{field} must be a number")
+
+
+def _optional_session_id(payload):
+    value = payload.get("current_session_id")
+    if value is None:
+        return None
+    return _int_value(value, "current_session_id", minimum=1, maximum=MAX_SQLITE_INTEGER)
+
+
+def _client_with_session_response(client):
+    session = None
+    if client and client.get("current_session_id"):
+        found = database.get_realtime_session(client["current_session_id"])
+        if found:
+            session = _realtime_session_response(found)
+    return {"client": client, "session": session}
+
+
+def _command_action_to_status(action):
+    mapping = {
+        "ack": "acked",
+        "running": "running",
+        "complete": "completed",
+        "fail": "failed",
+    }
+    status = mapping.get(action)
+    if not status:
+        raise HTTPException(404, "Unknown command action")
+    return status
 
 
 # ============================================================
@@ -317,6 +355,105 @@ def api_delete(file_id: int):
 
     database.delete_file(file_id)
     return {"message": "deleted"}
+
+
+@app.get("/api/realtime/clients")
+def api_list_realtime_clients():
+    return {"clients": database.list_realtime_clients(online_seconds=CLIENT_ONLINE_SECONDS)}
+
+
+@app.get("/api/realtime/clients/{client_id}")
+def api_get_realtime_client(client_id: str):
+    client_id = _validate_client_id(client_id)
+    client = database.get_realtime_client(client_id, online_seconds=CLIENT_ONLINE_SECONDS)
+    if not client:
+        raise HTTPException(404, "Realtime client not found")
+    return _client_with_session_response(client)
+
+
+@app.post("/api/realtime/clients/{client_id}/commands/start")
+async def api_start_realtime_client(client_id: str, payload: dict):
+    client_id = _validate_client_id(client_id)
+    chunk_duration = _float_metadata(payload, "chunk_duration", 2.0)
+    result = database.enqueue_start_capture_command(
+        client_id=client_id,
+        session_name=payload.get("session_name") or payload.get("name"),
+        chunk_duration=chunk_duration,
+    )
+    session = database.get_realtime_session(result["session_id"]) if result.get("session_id") else None
+    result["session_status"] = session["status"] if session else None
+    return result
+
+
+@app.post("/api/realtime/clients/{client_id}/commands/stop")
+def api_stop_realtime_client(client_id: str):
+    client_id = _validate_client_id(client_id)
+    return database.enqueue_stop_capture_command(client_id)
+
+
+@app.post("/api/realtime/agents/{client_id}/heartbeat")
+async def api_realtime_agent_heartbeat(client_id: str, payload: dict):
+    client_id = _validate_client_id(client_id)
+    current_session_id = _optional_session_id(payload)
+    last_sequence = _int_metadata(payload, "last_sequence", 0, minimum=0, maximum=MAX_SEQUENCE)
+    pending_chunks = _int_metadata(payload, "pending_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT)
+    failed_retryable_chunks = _int_metadata(
+        payload, "failed_retryable_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT
+    )
+    failed_conflict_chunks = _int_metadata(
+        payload, "failed_conflict_chunks", 0, minimum=0, maximum=MAX_QUEUE_COUNT
+    )
+    client = database.upsert_realtime_client(
+        client_id=client_id,
+        name=payload.get("name"),
+        status=payload.get("status", "idle"),
+        current_session_id=current_session_id,
+        agent_version=payload.get("agent_version"),
+        sample_rate=_int_metadata(payload, "sample_rate", 0, minimum=0, maximum=MAX_SAMPLE_RATE),
+        chunk_duration=_float_metadata(payload, "chunk_duration", 2.0),
+        last_sequence=last_sequence,
+        pending_chunks=pending_chunks,
+        failed_retryable_chunks=failed_retryable_chunks,
+        failed_conflict_chunks=failed_conflict_chunks,
+        message=payload.get("message", ""),
+    )
+    if current_session_id:
+        session = database.get_realtime_session(current_session_id)
+        if session and session["client_id"] == client_id:
+            database.update_realtime_heartbeat(
+                session_id=current_session_id,
+                client_id=client_id,
+                last_sequence=last_sequence,
+                pending_chunks=pending_chunks,
+                failed_retryable_chunks=failed_retryable_chunks,
+                failed_conflict_chunks=failed_conflict_chunks,
+                client_status=payload.get("status", "idle"),
+                message=payload.get("message", ""),
+            )
+    return {"ack": True, "client": client}
+
+
+@app.get("/api/realtime/agents/{client_id}/command")
+def api_get_realtime_agent_command(client_id: str):
+    client_id = _validate_client_id(client_id)
+    return {"command": database.get_next_realtime_command(client_id)}
+
+
+@app.post("/api/realtime/agents/{client_id}/commands/{command_id}/{action}")
+async def api_update_realtime_agent_command(client_id: str, command_id: int, action: str, payload: dict = None):
+    client_id = _validate_client_id(client_id)
+    command_id = _int_value(command_id, "command_id", minimum=1, maximum=MAX_SQLITE_INTEGER)
+    status = _command_action_to_status(action)
+    payload = payload or {}
+    command = database.update_realtime_command_status(
+        command_id=command_id,
+        client_id=client_id,
+        status=status,
+        error_message=payload.get("error_message"),
+    )
+    if not command:
+        raise HTTPException(404, "Realtime command not found")
+    return {"ack": True, "command": command}
 
 
 @app.post("/api/realtime/sessions")
