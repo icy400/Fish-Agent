@@ -1,6 +1,8 @@
 """Fish Agent — FastAPI server for acoustic fish feeding analysis."""
 
 import hashlib
+import csv
+import io
 import json
 import os
 import shutil
@@ -10,10 +12,16 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 import database
-from realtime_density import build_latest_sequence_rows, calculate_density, feeding_from_density
+from audio_intensity import calculate_sound_intensity
+from realtime_density import (
+    build_latest_sequence_rows,
+    calculate_average_sound_intensity,
+    calculate_density,
+    feeding_from_density,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -72,7 +80,8 @@ def _realtime_summary_for_window(session_id, current_sequence=None, current_anal
     analyzed = [row for row in rows if row.get("status") == "analyzed"]
     density = calculate_density(analyzed, expected_chunks=30)
     feeding = feeding_from_density(density["density_60s"], density["completeness_60s"])
-    return density, feeding
+    sound_intensity_60s = calculate_average_sound_intensity(rows)
+    return density, feeding, sound_intensity_60s
 
 
 def _realtime_session_response(session):
@@ -101,6 +110,98 @@ def _realtime_segment_response(segment):
         "confidence": response.get("feeding_confidence") or "insufficient",
     }
     return response
+
+
+def _segment_note(row):
+    if row.get("status") == "error":
+        return row.get("error_message") or "分片分析失败"
+    if row.get("status") == "missing":
+        return row.get("message") or "分片缺失，等待补传"
+    return row.get("feeding_message") or row.get("message") or "-"
+
+
+def _all_export_segment_rows(session_id):
+    rows = database.list_all_realtime_segments(session_id)
+    if not rows:
+        return []
+    latest_sequence = max(int(row["sequence"]) for row in rows)
+    return build_latest_sequence_rows(rows, limit=latest_sequence)
+
+
+def _session_export_payload(session):
+    segments = []
+    for row in _all_export_segment_rows(session["id"]):
+        segments.append({
+            "sequence": row.get("sequence"),
+            "captured_at": row.get("captured_at"),
+            "status": row.get("status"),
+            "predicted_class": row.get("predicted_class"),
+            "confidence": row.get("confidence"),
+            "fish_probability": row.get("fish_probability"),
+            "density_60s": row.get("density_60s"),
+            "sound_intensity": row.get("sound_intensity"),
+            "note": _segment_note(row),
+        })
+
+    return {
+        "session": {
+            "id": session.get("id"),
+            "client_id": session.get("client_id"),
+            "name": session.get("name"),
+            "status": session.get("status"),
+            "started_at": session.get("started_at") or session.get("created_at"),
+            "stopped_at": session.get("stopped_at"),
+            "density_60s": session.get("density_60s"),
+            "completeness_60s": session.get("completeness_60s"),
+            "sound_intensity_60s": session.get("sound_intensity_60s"),
+            "feeding_level": session.get("feeding_level"),
+            "feeding_amount": session.get("feeding_amount"),
+            "feeding_message": session.get("feeding_message"),
+        },
+        "segments": segments,
+    }
+
+
+def _session_export_csv(payload):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    session = payload["session"]
+
+    writer.writerow(["会话信息"])
+    writer.writerow(["字段", "值"])
+    for label, key in [
+        ("会话ID", "id"),
+        ("client_id", "client_id"),
+        ("会话名称", "name"),
+        ("状态", "status"),
+        ("开始时间", "started_at"),
+        ("停止时间", "stopped_at"),
+        ("60秒鱼声密度", "density_60s"),
+        ("数据完整度", "completeness_60s"),
+        ("60s平均声音能量强度", "sound_intensity_60s"),
+        ("投喂等级", "feeding_level"),
+        ("投喂量", "feeding_amount"),
+        ("投喂建议", "feeding_message"),
+    ]:
+        writer.writerow([label, session.get(key) if session.get(key) is not None else ""])
+
+    writer.writerow([])
+    writer.writerow(["分片分析"])
+    writer.writerow(["序号", "时间", "状态", "预测", "置信度", "鱼声概率", "密度", "平均声音能量强度", "建议/备注"])
+    for row in payload["segments"]:
+        writer.writerow([
+            row.get("sequence"),
+            row.get("captured_at") or "",
+            row.get("status") or "",
+            row.get("predicted_class") or "",
+            row.get("confidence") if row.get("confidence") is not None else "",
+            row.get("fish_probability") if row.get("fish_probability") is not None else "",
+            row.get("density_60s") if row.get("density_60s") is not None else "",
+            row.get("sound_intensity") if row.get("sound_intensity") is not None else "",
+            row.get("note") or "",
+        ])
+
+    return output.getvalue()
 
 
 def _load_realtime_metadata(metadata):
@@ -519,6 +620,11 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
         raise HTTPException(500, f"Failed to store realtime chunk: {e}")
 
     try:
+        sound_intensity = calculate_sound_intensity(storage_path)
+    except Exception:
+        sound_intensity = 0
+
+    try:
         inserted = database.insert_realtime_segment(
             session_id=session_id,
             client_id=meta["client_id"],
@@ -528,6 +634,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             sample_rate=_int_metadata(meta, "sample_rate", 0, minimum=0, maximum=MAX_SAMPLE_RATE),
             storage_name=str(Path(str(session_id)) / storage_name),
             sha256=file_hash,
+            sound_intensity=sound_intensity,
         )
     except database.SequenceConflictError:
         _safe_unlink(storage_path)
@@ -562,7 +669,14 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
     try:
         result = classify_file(str(storage_path))
         if "error" in result:
-            database.update_realtime_segment_error(inserted["id"], result["error"])
+            sound_intensity_60s = calculate_average_sound_intensity(
+                database.list_realtime_segments(session_id, limit=30)
+            )
+            database.update_realtime_segment_error(
+                inserted["id"],
+                result["error"],
+                sound_intensity_60s=sound_intensity_60s,
+            )
             return {
                 "ack": True,
                 "session_id": session_id,
@@ -573,7 +687,7 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             }
 
         analysis = _chunk_analysis_from_result(result)
-        density, feeding = _realtime_summary_for_window(
+        density, feeding, sound_intensity_60s = _realtime_summary_for_window(
             session_id,
             current_sequence=sequence,
             current_analysis=analysis,
@@ -587,6 +701,8 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             density_60s=density["density_60s"],
             completeness_60s=density["completeness_60s"],
             feeding=feeding,
+            sound_intensity=sound_intensity,
+            sound_intensity_60s=sound_intensity_60s,
         )
         segment = _realtime_segment_response(database.get_realtime_segment(inserted["id"]))
         return {
@@ -598,7 +714,10 @@ async def api_upload_realtime_chunk(session_id: int, file: UploadFile = File(...
             "segment": segment,
         }
     except Exception as e:
-        database.update_realtime_segment_error(inserted["id"], str(e))
+        sound_intensity_60s = calculate_average_sound_intensity(
+            database.list_realtime_segments(session_id, limit=30)
+        )
+        database.update_realtime_segment_error(inserted["id"], str(e), sound_intensity_60s=sound_intensity_60s)
         return JSONResponse(
             content={
                 "ack": True,
@@ -618,6 +737,28 @@ def api_get_realtime_session(session_id: int):
     if not session:
         raise HTTPException(404, "Realtime session not found")
     return _realtime_session_response(session)
+
+
+@app.get("/api/realtime/sessions/{session_id}/export")
+def api_export_realtime_session(session_id: int, format: str = "csv"):
+    session_id = _validate_session_id(session_id)
+    session = database.get_realtime_session(session_id)
+    if not session:
+        raise HTTPException(404, "Realtime session not found")
+
+    export_format = (format or "csv").lower()
+    payload = _session_export_payload(session)
+    if export_format == "json":
+        return payload
+    if export_format != "csv":
+        raise HTTPException(400, "format must be csv or json")
+
+    filename = f"realtime_session_{session_id}.csv"
+    return Response(
+        content="\ufeff" + _session_export_csv(payload),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.delete("/api/realtime/sessions/{session_id}")

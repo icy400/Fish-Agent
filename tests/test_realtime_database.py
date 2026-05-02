@@ -154,6 +154,30 @@ class RealtimeDatabaseTests(unittest.TestCase):
         self.assertEqual(session["density_60s"], 0.1)
         self.assertEqual(session["feeding_level"], "medium")
 
+    def test_update_segment_analysis_stores_sound_intensity_summary(self):
+        session_id = database.create_realtime_session("client-1", "pond-a", 2.0)
+        inserted = database.insert_realtime_segment(
+            session_id, "client-1", 1, "2026-04-29 10:00:00", 2.0, 100000, "1.wav", "abc"
+        )
+
+        database.update_realtime_segment_analysis(
+            segment_id=inserted["id"],
+            predicted_class="background",
+            confidence=0.91,
+            fish_probability=0.09,
+            background_probability=0.91,
+            density_60s=0.0,
+            completeness_60s=0.1,
+            feeding={"level": "minimal", "amount_kg": 0.1, "message": "数据不足，建议保守处理", "confidence": "insufficient"},
+            sound_intensity=12.5,
+            sound_intensity_60s=8.25,
+        )
+
+        segment = database.get_realtime_segment(inserted["id"])
+        session = database.get_realtime_session(session_id)
+        self.assertEqual(segment["sound_intensity"], 12.5)
+        self.assertEqual(session["sound_intensity_60s"], 8.25)
+
     def test_update_segment_analysis_returns_false_for_missing_segment(self):
         result = database.update_realtime_segment_analysis(
             segment_id=999,
@@ -237,6 +261,47 @@ class RealtimeDatabaseTests(unittest.TestCase):
         session = database.get_realtime_session(1)
         self.assertEqual(result, True)
         self.assertEqual(session["client_last_sequence"], 12)
+        self.assertIn("sound_intensity_60s", session)
+
+    def test_init_db_migrates_legacy_realtime_segments_sound_intensity(self):
+        db_path = str(Path(self.tmp.name) / "legacy_segments.db")
+        with sqlite3.connect(db_path) as db:
+            db.execute("""
+                CREATE TABLE realtime_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id TEXT NOT NULL,
+                    name TEXT,
+                    status TEXT NOT NULL,
+                    chunk_duration REAL DEFAULT 2.0,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT
+                )
+            """)
+            db.execute("""
+                CREATE TABLE realtime_segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    client_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    duration REAL NOT NULL,
+                    sample_rate INTEGER,
+                    storage_name TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    UNIQUE(session_id, sequence)
+                )
+            """)
+            db.commit()
+
+        database.init_db(db_path)
+
+        with sqlite3.connect(db_path) as db:
+            session_columns = {row[1] for row in db.execute("PRAGMA table_info(realtime_sessions)").fetchall()}
+            segment_columns = {row[1] for row in db.execute("PRAGMA table_info(realtime_segments)").fetchall()}
+        self.assertIn("sound_intensity_60s", session_columns)
+        self.assertIn("sound_intensity", segment_columns)
 
     def test_update_realtime_heartbeat_returns_true_for_matching_session_and_client(self):
         session_id = database.create_realtime_session("client-1", "pond-a", 2.0)

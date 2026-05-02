@@ -24,6 +24,23 @@ def calculate_density(chunks, expected_chunks=30):
     }
 
 
+def calculate_average_sound_intensity(chunks):
+    values = []
+    for chunk in chunks:
+        if chunk.get("status") == "missing":
+            continue
+        value = chunk.get("sound_intensity")
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return 0
+    return round(sum(values) / len(values), 6)
+
+
 def feeding_from_density(density, completeness):
     if density >= 0.15:
         amount, level, message = 0.8, "high", "进食活跃，建议足量投喂"

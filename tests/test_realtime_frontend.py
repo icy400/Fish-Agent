@@ -31,6 +31,12 @@ class RealtimeFrontendTests(unittest.TestCase):
         self.assertIn("会话历史", html)
         self.assertIn("deleteSession", html)
         self.assertIn("confirm(", html)
+        self.assertIn("导出CSV", html)
+        self.assertIn("导出JSON", html)
+        self.assertIn("exportSession", html)
+        self.assertIn("/export?format=", html)
+        self.assertIn("60s平均能量", html)
+        self.assertIn("能量强度", html)
 
     def test_existing_pages_link_to_realtime(self):
         for page in ["index.html", "upload.html", "detail.html"]:

@@ -51,6 +51,7 @@ def init_db(path):
                 client_status TEXT DEFAULT 'unknown',
                 density_60s REAL DEFAULT 0,
                 completeness_60s REAL DEFAULT 0,
+                sound_intensity_60s REAL DEFAULT 0,
                 feeding_level TEXT,
                 feeding_amount REAL DEFAULT 0,
                 feeding_message TEXT,
@@ -78,6 +79,7 @@ def init_db(path):
                 background_probability REAL DEFAULT 0,
                 density_60s REAL DEFAULT 0,
                 completeness_60s REAL DEFAULT 0,
+                sound_intensity REAL DEFAULT 0,
                 feeding_level TEXT,
                 feeding_amount REAL DEFAULT 0,
                 feeding_message TEXT,
@@ -131,6 +133,17 @@ def init_db(path):
         if "queue_key" not in realtime_session_columns:
             db.execute(
                 "ALTER TABLE realtime_sessions ADD COLUMN queue_key TEXT"
+            )
+        if "sound_intensity_60s" not in realtime_session_columns:
+            db.execute(
+                "ALTER TABLE realtime_sessions ADD COLUMN sound_intensity_60s REAL DEFAULT 0"
+            )
+        realtime_segment_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(realtime_segments)").fetchall()
+        }
+        if "sound_intensity" not in realtime_segment_columns:
+            db.execute(
+                "ALTER TABLE realtime_segments ADD COLUMN sound_intensity REAL DEFAULT 0"
             )
         db.execute("""
             CREATE INDEX IF NOT EXISTS idx_realtime_segments_session_captured
@@ -257,7 +270,8 @@ def get_realtime_session(session_id):
         return _row_to_dict(row)
 
 
-def insert_realtime_segment(session_id, client_id, sequence, captured_at, duration, sample_rate, storage_name, sha256):
+def insert_realtime_segment(session_id, client_id, sequence, captured_at, duration, sample_rate, storage_name, sha256,
+                            sound_intensity=0):
     with get_conn() as db:
         db.row_factory = sqlite3.Row
         existing = db.execute(
@@ -272,9 +286,10 @@ def insert_realtime_segment(session_id, client_id, sequence, captured_at, durati
             cur = db.execute(
                 """INSERT INTO realtime_segments
                    (session_id, client_id, sequence, captured_at, received_at, duration, sample_rate,
-                    storage_name, sha256, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')""",
-                (session_id, client_id, sequence, captured_at, now, duration, sample_rate, storage_name, sha256),
+                    storage_name, sha256, status, sound_intensity)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?)""",
+                (session_id, client_id, sequence, captured_at, now, duration, sample_rate, storage_name, sha256,
+                 sound_intensity),
             )
         except sqlite3.IntegrityError:
             existing = db.execute(
@@ -315,6 +330,18 @@ def list_realtime_segments(session_id, limit=20):
         return [dict(row) for row in reversed(rows)]
 
 
+def list_all_realtime_segments(session_id):
+    with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """SELECT * FROM realtime_segments
+               WHERE session_id=?
+               ORDER BY sequence ASC""",
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def list_realtime_sessions_for_client(client_id, limit=20):
     with get_conn() as db:
         db.row_factory = sqlite3.Row
@@ -329,7 +356,8 @@ def list_realtime_sessions_for_client(client_id, limit=20):
 
 
 def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fish_probability,
-                                     background_probability, density_60s, completeness_60s, feeding):
+                                     background_probability, density_60s, completeness_60s, feeding,
+                                     sound_intensity=None, sound_intensity_60s=None):
     with get_conn() as db:
         db.row_factory = sqlite3.Row
         row = db.execute("SELECT session_id FROM realtime_segments WHERE id=?", (segment_id,)).fetchone()
@@ -341,6 +369,7 @@ def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fi
             """UPDATE realtime_segments
                SET status='analyzed', predicted_class=?, confidence=?, fish_probability=?,
                    background_probability=?, density_60s=?, completeness_60s=?,
+                   sound_intensity=COALESCE(?, sound_intensity),
                    feeding_level=?, feeding_amount=?, feeding_message=?, feeding_confidence=?, error_message=NULL
                WHERE id=?""",
             (
@@ -350,6 +379,7 @@ def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fi
                 background_probability,
                 density_60s,
                 completeness_60s,
+                sound_intensity,
                 feeding.get("level"),
                 feeding.get("amount_kg"),
                 feeding.get("message"),
@@ -360,7 +390,8 @@ def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fi
         db.execute(
             """UPDATE realtime_sessions
                SET density_60s=?, completeness_60s=?, feeding_level=?, feeding_amount=?,
-                   feeding_message=?, feeding_confidence=?, health_status='receiving',
+                   feeding_message=?, feeding_confidence=?,
+                   sound_intensity_60s=COALESCE(?, sound_intensity_60s), health_status='receiving',
                    health_message='实时监测正常'
                WHERE id=?""",
             (
@@ -370,6 +401,7 @@ def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fi
                 feeding.get("amount_kg"),
                 feeding.get("message"),
                 feeding.get("confidence"),
+                sound_intensity_60s,
                 session_id,
             ),
         )
@@ -377,12 +409,19 @@ def update_realtime_segment_analysis(segment_id, predicted_class, confidence, fi
         return True
 
 
-def update_realtime_segment_error(segment_id, error_message):
+def update_realtime_segment_error(segment_id, error_message, sound_intensity_60s=None):
     with get_conn() as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT session_id FROM realtime_segments WHERE id=?", (segment_id,)).fetchone()
         db.execute(
             "UPDATE realtime_segments SET status='error', error_message=? WHERE id=?",
             (error_message, segment_id),
         )
+        if row and sound_intensity_60s is not None:
+            db.execute(
+                "UPDATE realtime_sessions SET sound_intensity_60s=? WHERE id=?",
+                (sound_intensity_60s, row["session_id"]),
+            )
         db.commit()
 
 

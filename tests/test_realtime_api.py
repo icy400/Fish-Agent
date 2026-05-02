@@ -423,6 +423,39 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(segments.status_code, 200)
         self.assertEqual(segments.json()["segments"][0]["sequence"], 1)
 
+    def test_upload_chunk_stores_sound_intensity_and_updates_60s_average(self):
+        wav_path = Path(self.tmp.name) / "chunk.wav"
+        write_silent_wav(wav_path)
+        content = wav_path.read_bytes()
+        session = self._create_session()
+        background_result = {
+            "segments": [{
+                "predicted_class": "background",
+                "confidence": 0.95,
+                "probabilities": {"background": 0.95, "fish": 0.05},
+            }]
+        }
+
+        with (
+            mock.patch.object(self.app_module, "classify_file", return_value=background_result),
+            mock.patch.object(self.app_module, "calculate_sound_intensity", side_effect=[10.0, 20.0], create=True) as fake_energy,
+        ):
+            for sequence in (1, 2):
+                metadata = self._chunk_metadata(session["id"], content, sequence=sequence)
+                res = self.client.post(
+                    f"/api/realtime/sessions/{session['id']}/chunks",
+                    data={"metadata": json.dumps(metadata)},
+                    files={"file": ("chunk.wav", content, "audio/wav")},
+                )
+                self.assertEqual(res.status_code, 200)
+
+        summary = self.client.get(f"/api/realtime/sessions/{session['id']}")
+        segments = self.client.get(f"/api/realtime/sessions/{session['id']}/segments?limit=2")
+
+        self.assertEqual(fake_energy.call_count, 2)
+        self.assertEqual(summary.json()["sound_intensity_60s"], 15.0)
+        self.assertEqual([row["sound_intensity"] for row in segments.json()["segments"]], [10.0, 20.0])
+
     def test_stop_session_marks_session_stopped(self):
         session = self._create_session()
         res = self.client.post(f"/api/realtime/sessions/{session['id']}/stop")
@@ -448,6 +481,77 @@ class RealtimeApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual([row["sequence"] for row in res.json()["segments"]], [1, 2, 3])
         self.assertEqual(res.json()["segments"][1]["status"], "missing")
+
+    def test_export_current_session_json_includes_summary_and_all_segments(self):
+        session = self._create_session()
+        import database
+        for sequence in range(1, 36):
+            inserted = database.insert_realtime_segment(
+                session["id"],
+                "client-1",
+                sequence,
+                f"2026-04-29 10:00:{sequence:02d}",
+                2.0,
+                22050,
+                f"{sequence}.wav",
+                str(sequence),
+            )
+            database.update_realtime_segment_analysis(
+                segment_id=inserted["id"],
+                predicted_class="background",
+                confidence=0.9,
+                fish_probability=0.1,
+                background_probability=0.9,
+                density_60s=0.0,
+                completeness_60s=1.0,
+                feeding={"level": "minimal", "amount_kg": 0.1, "message": "进食较弱，建议不投喂或极少量", "confidence": "normal"},
+                sound_intensity=float(sequence),
+                sound_intensity_60s=20.5,
+            )
+
+        res = self.client.get(f"/api/realtime/sessions/{session['id']}/export?format=json")
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["session"]["id"], session["id"])
+        self.assertIn("sound_intensity_60s", data["session"])
+        self.assertEqual(len(data["segments"]), 35)
+        self.assertEqual(data["segments"][0]["sequence"], 1)
+        self.assertEqual(data["segments"][-1]["sequence"], 35)
+        self.assertIn("sound_intensity", data["segments"][0])
+        self.assertNotIn("sound_intensity_60s", data["segments"][0])
+        self.assertIn("note", data["segments"][0])
+
+    def test_export_current_session_csv_contains_summary_and_detail_sections(self):
+        session = self._create_session()
+        import database
+        inserted = database.insert_realtime_segment(
+            session["id"], "client-1", 1, "2026-04-29 10:00:00", 2.0, 22050, "1.wav", "a"
+        )
+        database.update_realtime_segment_analysis(
+            segment_id=inserted["id"],
+            predicted_class="fish",
+            confidence=0.91,
+            fish_probability=0.91,
+            background_probability=0.09,
+            density_60s=0.1,
+            completeness_60s=0.9,
+            feeding={"level": "medium", "amount_kg": 0.5, "message": "进食正常，建议标准投喂", "confidence": "normal"},
+            sound_intensity=12.5,
+            sound_intensity_60s=12.5,
+        )
+
+        res = self.client.get(f"/api/realtime/sessions/{session['id']}/export?format=csv")
+        text = res.text
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("会话信息", text)
+        self.assertIn("分片分析", text)
+        self.assertIn("60s平均声音能量强度", text)
+        self.assertIn("平均声音能量强度", text)
+        self.assertIn("建议/备注", text)
+        self.assertNotIn("健康状态", text)
+        self.assertNotIn("健康消息", text)
 
     def test_agent_heartbeat_registers_client_and_clients_endpoint_lists_it(self):
         heartbeat = self.client.post(

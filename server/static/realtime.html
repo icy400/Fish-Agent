@@ -69,6 +69,7 @@
     <div class="stat-card"><div class="label">连接状态</div><div class="value" id="health-status">等待</div></div>
     <div class="stat-card"><div class="label">60秒鱼声密度</div><div class="value fish" id="density">0%</div></div>
     <div class="stat-card"><div class="label">数据完整度</div><div class="value" id="completeness">0%</div></div>
+    <div class="stat-card"><div class="label">60s平均能量</div><div class="value" id="intensity60">0</div></div>
     <div class="stat-card"><div class="label">投喂建议</div><div class="value high" id="feeding">-</div></div>
   </div>
 
@@ -78,13 +79,19 @@
   </div>
 
   <div class="card">
-    <h2>分片分析</h2>
+    <div class="card-head">
+      <h2>分片分析</h2>
+      <div class="card-tools">
+        <button class="btn btn-sm" onclick="exportSession('csv')">导出CSV</button>
+        <button class="btn btn-sm" onclick="exportSession('json')">导出JSON</button>
+      </div>
+    </div>
     <div class="seg-scroll">
       <table>
         <thead>
-          <tr><th>序号</th><th>时间</th><th>状态</th><th>预测</th><th>置信度</th><th>鱼声概率</th><th>密度</th><th>建议</th></tr>
+          <tr><th>序号</th><th>时间</th><th>状态</th><th>预测</th><th>置信度</th><th>鱼声概率</th><th>密度</th><th>能量强度</th><th>建议/备注</th></tr>
         </thead>
-        <tbody id="latest-body"><tr><td colspan="8" class="empty">暂无实时分片</td></tr></tbody>
+        <tbody id="latest-body"><tr><td colspan="9" class="empty">暂无实时分片</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -105,6 +112,12 @@ function escapeHtml(value) {
 
 function pct(value) {
   return `${Math.round((Number(value) || 0) * 100)}%`;
+}
+
+function numberText(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  return num.toFixed(4);
 }
 
 function setSelectedClient(text) {
@@ -330,9 +343,10 @@ function resetSessionPanel() {
   document.getElementById('health-status').textContent = selectedClientId ? '等待采集命令' : '等待';
   document.getElementById('density').textContent = '0%';
   document.getElementById('completeness').textContent = '0%';
+  document.getElementById('intensity60').textContent = '0';
   document.getElementById('feeding').textContent = '-';
   document.getElementById('timeline').replaceChildren();
-  document.getElementById('latest-body').innerHTML = '<tr><td colspan="8" class="empty">暂无实时分片</td></tr>';
+  document.getElementById('latest-body').innerHTML = '<tr><td colspan="9" class="empty">暂无实时分片</td></tr>';
 }
 
 async function loadSummary() {
@@ -346,6 +360,7 @@ async function loadSummary() {
     document.getElementById('health-status').textContent = health.message || s.health_message || s.health_status || '-';
     document.getElementById('density').textContent = pct(s.density_60s);
     document.getElementById('completeness').textContent = pct(s.completeness_60s);
+    document.getElementById('intensity60').textContent = numberText(s.sound_intensity_60s);
     document.getElementById('feeding').textContent = `${feeding.level || s.feeding_level || '-'} ${feeding.amount_kg || s.feeding_amount || 0}kg`;
     setSelectedClient(selectedClientLabel());
   } catch (e) {
@@ -361,7 +376,7 @@ async function loadSegments() {
     renderTimeline(data.segments || []);
     renderTable(data.segments || []);
   } catch (e) {
-    document.getElementById('latest-body').innerHTML = '<tr><td colspan="8" class="empty">实时数据加载失败</td></tr>';
+    document.getElementById('latest-body').innerHTML = '<tr><td colspan="9" class="empty">实时数据加载失败</td></tr>';
   }
 }
 
@@ -381,7 +396,7 @@ function renderTimeline(rows) {
 function renderTable(rows) {
   const body = document.getElementById('latest-body');
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">暂无实时分片</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty">暂无实时分片</td></tr>';
     return;
   }
   body.innerHTML = rows.map(row => `
@@ -393,9 +408,15 @@ function renderTable(rows) {
       <td>${pct(row.confidence)}</td>
       <td>${pct(row.fish_probability)}</td>
       <td>${pct(row.density_60s)}</td>
-      <td>${escapeHtml(row.feeding_message || row.message || '-')}</td>
+      <td>${numberText(row.sound_intensity)}</td>
+      <td>${escapeHtml(row.feeding_message || row.error_message || row.message || '-')}</td>
     </tr>
   `).join('');
+}
+
+function exportSession(format) {
+  if (!sessionId) return;
+  window.location.href = `/api/realtime/sessions/${sessionId}/export?format=${encodeURIComponent(format)}`;
 }
 
 document.getElementById('refresh-btn').addEventListener('click', pollNow);
